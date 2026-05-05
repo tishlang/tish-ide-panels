@@ -1,0 +1,20 @@
+// File list panel (JSX).
+
+import {} from "lattish"
+
+export fn FileBrowserPanel(paths, currentPath, onSelect) {
+  let items = []
+  let i = 0
+  while (i < paths.length) {
+    let path = paths[i]
+    let isSelected = path === currentPath
+    let cls = "pg-files-item"
+    if (isSelected) { cls = cls + " pg-files-item-selected" }
+    items.push(<button class={cls} onclick={() => onSelect(path)}>{path}</button>)
+    i = i + 1
+  }
+  return <nav class="pg-files">
+    <div class="pg-files-title">{"Files"}</div>
+    {items}
+  </nav>
+}

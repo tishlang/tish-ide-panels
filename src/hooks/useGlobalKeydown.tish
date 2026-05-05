@@ -1,0 +1,32 @@
+// Hook for global keyboard shortcuts.
+
+import { useLayoutEffect } from "lattish"
+
+export fn useGlobalKeydown(handlers) {
+  useLayoutEffect(() => {
+    fn onKeydown(e) {
+      let isMac = typeof navigator !== "undefined" && navigator.platform !== undefined && navigator.platform.toUpperCase().indexOf("MAC") >= 0
+      let mod = isMac ? e.metaKey : e.ctrlKey
+      if (!mod) { return }
+      if (e.key === "s") {
+        e.preventDefault()
+        handlers.onSave()
+      } else if (e.key === "Enter") {
+        e.preventDefault()
+        handlers.onRun()
+      } else if (e.key >= "1" && e.key <= "4") {
+        let t = document.activeElement
+        if (t !== null && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) { return }
+        e.preventDefault()
+        handlers.onTabSwitch(parseInt(e.key, 10) - 1)
+      } else if (e.key === "Tab") {
+        let t = document.activeElement
+        if (t !== null && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) { return }
+        e.preventDefault()
+        handlers.onTabCycle(e.shiftKey)
+      }
+    }
+    document.addEventListener("keydown", onKeydown)
+    return () => document.removeEventListener("keydown", onKeydown)
+  }, [])
+}

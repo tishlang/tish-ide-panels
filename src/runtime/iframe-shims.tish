@@ -1,0 +1,210 @@
+// iframe-shims — pure-Tish, browser-native implementations of the
+// tish-browser-server / fs / http surface, suitable for a srcdoc iframe.
+//
+// Why a separate impl: srcdoc iframes have origin `null`, which means
+// Service Workers cannot be registered. The full `tish-browser-server`
+// package uses an SW for its `serve(port, handler)`; that's perfect for a
+// real app deploy, but won't load inside the lesson sandbox iframe.
+//
+// These shims provide the same observable behavior with simpler plumbing:
+//   - `serve(port, handler)` monkey-patches `window.fetch` so any request
+//     hitting the iframe is routed through the user's handler instead.
+//   - `readFile`/`writeFile`/`readDir`/`mkdir`/`fileExists`/`unlink` use an
+//     in-memory map (the iframe is short-lived; persistence isn't useful).
+//   - `createBcWebSocket(channel)` uses `BroadcastChannel` directly — that
+//     works fine in `srcdoc` documents.
+//
+// All symbols are top-level so the JS codegen emits them as global
+// `function`/`const` declarations once the bundle is concatenated with
+// the user's compiled JS in the iframe `<script>`.
+
+// ── HTTP shim — fetch monkey-patch ────────────────────────────────────
+
+let __servedHandler = null
+let __servedFetchInstalled = false
+
+fn __installFetchInterceptor() {
+  if (__servedFetchInstalled) { return }
+  __servedFetchInstalled = true
+  let origFetch = window.fetch.bind(window)
+  window.fetch = (url, opts) => {
+    if (__servedHandler === null) { return origFetch(url, opts) }
+    let urlStr = String(url)
+    let path = urlStr
+    if (urlStr.indexOf("://") >= 0) {
+      try {
+        let u = new URL(urlStr)
+        path = u.pathname + u.search
+      } catch (e) { }
+    }
+    let method = "GET"
+    let body = ""
+    let headers = {}
+    if (opts !== null && opts !== undefined) {
+      if (opts.method !== undefined && opts.method !== null) { method = String(opts.method) }
+      if (opts.body !== undefined && opts.body !== null) { body = String(opts.body) }
+      if (opts.headers !== undefined && opts.headers !== null) { headers = opts.headers }
+    }
+    let req = { method: method, path: path, body: body, headers: headers }
+    return Promise.resolve().then(() => __servedHandler(req)).then((res) => {
+      let status = 200
+      let respHeaders = {}
+      let respBody = ""
+      if (res !== null && typeof res === "object") {
+        if (res.status !== undefined && res.status !== null) { status = res.status }
+        if (res.headers !== undefined && res.headers !== null) { respHeaders = res.headers }
+        if (res.body !== undefined && res.body !== null) {
+          if (typeof res.body === "string") {
+            respBody = res.body
+          } else {
+            respBody = JSON.stringify(res.body)
+            if (respHeaders["Content-Type"] === undefined) {
+              respHeaders["Content-Type"] = "application/json"
+            }
+          }
+        }
+      }
+      return new Response(respBody, { status: status, headers: respHeaders })
+    })
+  }
+}
+
+export fn serve(port, handler) {
+  __servedHandler = handler
+  __installFetchInterceptor()
+  console.log("[tish-browser-server (iframe)] serve(" + String(port) + ") — fetch shim active")
+}
+
+export fn dispatch(req) {
+  if (__servedHandler === null) {
+    return Promise.resolve({ status: 503, body: "no handler", headers: {} })
+  }
+  return Promise.resolve(__servedHandler(req))
+}
+
+// ── FS shim — in-memory ────────────────────────────────────────────────
+
+let __fileStore = {}
+
+export async fn readFile(path) {
+  if (path in __fileStore) { return __fileStore[path] }
+  return null
+}
+
+export async fn writeFile(path, content) {
+  __fileStore[path] = content === null || content === undefined ? "" : String(content)
+}
+
+export async fn fileExists(path) {
+  return path in __fileStore
+}
+
+export async fn readDir(path) {
+  let prefix = ""
+  if (path !== "" && path !== ".") {
+    prefix = path.charAt(path.length - 1) === "/" ? path : path + "/"
+  }
+  let out = []
+  let keys = Object.keys(__fileStore)
+  let i = 0
+  while (i < keys.length) {
+    let k = keys[i]
+    if (prefix === "" || k.indexOf(prefix) === 0) {
+      let rest = prefix === "" ? k : k.substring(prefix.length)
+      let slash = rest.indexOf("/")
+      let name = slash >= 0 ? rest.substring(0, slash) : rest
+      if (name !== "" && out.indexOf(name) < 0) { out.push(name) }
+    }
+    i = i + 1
+  }
+  return out
+}
+
+export async fn mkdir(path) {
+  // No-op for an in-memory flat store; subdirs are implicit in path strings.
+}
+
+export async fn unlink(path) {
+  if (path in __fileStore) {
+    let next = {}
+    let keys = Object.keys(__fileStore)
+    let i = 0
+    while (i < keys.length) {
+      let k = keys[i]
+      if (k !== path) { next[k] = __fileStore[k] }
+      i = i + 1
+    }
+    __fileStore = next
+  }
+}
+
+export async fn clearAll() {
+  __fileStore = {}
+}
+
+// ── WebSocket shim — BroadcastChannel-backed ───────────────────────────
+
+export fn createBcWebSocket(channel) {
+  let bc = new BroadcastChannel(channel)
+  let messageListeners = []
+  let openListeners = []
+  let closeListeners = []
+  let api = {
+    send: (data) => bc.postMessage(typeof data === "string" ? data : JSON.stringify(data)),
+    close: () => bc.close(),
+    addEventListener: (kind, f) => {
+      if (kind === "message") { messageListeners.push(f) }
+      else if (kind === "open") { openListeners.push(f) }
+      else if (kind === "close") { closeListeners.push(f) }
+    },
+    removeEventListener: (kind, f) => {
+      let arr = null
+      if (kind === "message") { arr = messageListeners }
+      else if (kind === "open") { arr = openListeners }
+      else if (kind === "close") { arr = closeListeners }
+      if (arr === null) { return }
+      let i = 0
+      while (i < arr.length) {
+        if (arr[i] === f) { arr.splice(i, 1); return }
+        i = i + 1
+      }
+    },
+    onmessage: null,
+    onopen: null,
+    onclose: null
+  }
+  bc.onmessage = (ev) => {
+    let evt = { data: ev.data }
+    if (api.onmessage !== null) { try { api.onmessage(evt) } catch (e) { } }
+    let i = 0
+    while (i < messageListeners.length) {
+      try { messageListeners[i](evt) } catch (e) { }
+      i = i + 1
+    }
+  }
+  setTimeout(() => {
+    let evt = { type: "open" }
+    if (api.onopen !== null) { try { api.onopen(evt) } catch (e) { } }
+    let i = 0
+    while (i < openListeners.length) {
+      try { openListeners[i](evt) } catch (e) { }
+      i = i + 1
+    }
+  }, 0)
+  return api
+}
+
+// ── process mock ───────────────────────────────────────────────────────
+
+export const process = {
+  env: {},
+  argv: [],
+  cwd: () => "/",
+  exit: (code) => { console.log("[exit " + String(code === undefined ? 0 : code) + "]") }
+}
+
+export fn getProcess() { return process }
+
+export fn setOnExit(handler) {
+  // No-op inside the iframe sandbox.
+}

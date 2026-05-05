@@ -1,0 +1,95 @@
+// Terminal / console panel (JSX).
+//
+// Public API on the ref:
+//   appendLine(line)              -> plain output line
+//   appendKind(kind, line)        -> "info" | "warn" | "error" | "runtime-error"
+//                                    | "compile-error" | "trace"
+//   appendError(title, body)      -> two-part error block (title + body)
+//   clear()
+
+import { useRef, useLayoutEffect } from "lattish"
+
+fn makeLine(text, cls) {
+  let row = document.createElement("div")
+  row.className = "pg-line " + cls
+  row.textContent = text
+  return row
+}
+
+fn classFor(kind) {
+  if (kind === "info") { return "pg-line-info" }
+  if (kind === "warn") { return "pg-line-warn" }
+  if (kind === "error") { return "pg-line-error" }
+  if (kind === "runtime-error") { return "pg-line-runtime-error" }
+  if (kind === "compile-error") { return "pg-line-compile-error" }
+  if (kind === "trace") { return "pg-line-trace" }
+  return "pg-line-out"
+}
+
+fn labelFor(kind) {
+  if (kind === "info") { return "info" }
+  if (kind === "warn") { return "warn" }
+  if (kind === "runtime-error") { return "runtime" }
+  if (kind === "compile-error") { return "compile" }
+  if (kind === "error") { return "error" }
+  return null
+}
+
+export fn TerminalPanel(apiRef) {
+  let outRef = useRef(null)
+  useLayoutEffect(() => {
+    if (apiRef === null || apiRef === undefined) { return }
+    if (outRef.current !== null && outRef.current !== undefined) {
+      let host = outRef.current
+      apiRef.current = {
+        appendLine: (line) => {
+          host.appendChild(makeLine(line, "pg-line-out"))
+          host.scrollTop = host.scrollHeight
+        },
+        appendKind: (kind, line) => {
+          let row = document.createElement("div")
+          row.className = "pg-line " + classFor(kind)
+          let lbl = labelFor(kind)
+          if (lbl !== null) {
+            let chip = document.createElement("span")
+            chip.className = "pg-line-chip"
+            chip.textContent = lbl
+            row.appendChild(chip)
+          }
+          let body = document.createElement("span")
+          body.className = "pg-line-body"
+          body.textContent = line
+          row.appendChild(body)
+          host.appendChild(row)
+          host.scrollTop = host.scrollHeight
+        },
+        appendError: (title, body) => {
+          let block = document.createElement("div")
+          block.className = "pg-error-block"
+          let head = document.createElement("div")
+          head.className = "pg-error-head"
+          let icon = document.createElement("span")
+          icon.className = "pg-error-icon"
+          icon.textContent = "!"
+          let ttl = document.createElement("span")
+          ttl.className = "pg-error-title"
+          ttl.textContent = title
+          head.appendChild(icon)
+          head.appendChild(ttl)
+          block.appendChild(head)
+          let pre = document.createElement("pre")
+          pre.className = "pg-error-body"
+          pre.textContent = body
+          block.appendChild(pre)
+          host.appendChild(block)
+          host.scrollTop = host.scrollHeight
+        },
+        clear: () => { host.textContent = "" }
+      }
+    }
+  }, [])
+  return <div class="pg-terminal">
+    <div class="pg-terminal__label">{"Console"}</div>
+    <div ref={outRef} class="pg-terminal__out scrollbar-thin" />
+  </div>
+}

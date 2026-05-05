@@ -1,0 +1,28 @@
+// Iframe runtime entry — gets compiled to a single JS bundle that
+// `compileToJsWithRuntime` prepends to the user's compiled lesson code
+// before injecting into the sandbox iframe.
+//
+// We import each public symbol so Tish's bundler walks the dependency
+// graph and emits one flat top-level script. Once concatenated with the
+// user JS, every name below is in scope for the user — without them
+// having to (or being able to) `import` it. This is what lets lesson
+// source like `serve(port, handler)` and `<App />` work after the
+// runtime stripper drops bare-specifier imports.
+
+import { createRoot, useState, useRef, useLayoutEffect, useEffect, useMemo, Fragment } from "lattish"
+
+import {
+  serve,
+  dispatch,
+  readFile,
+  writeFile,
+  fileExists,
+  readDir,
+  mkdir,
+  unlink,
+  clearAll,
+  createBcWebSocket,
+  process,
+  getProcess,
+  setOnExit
+} from "./runtime/iframe-shims.tish"

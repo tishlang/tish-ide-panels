@@ -1,0 +1,237 @@
+// MiniRunner — the minimal beginner code widget.
+//
+// Editor + Run button + tiny output diff strip. No terminal chrome, no preview
+// iframe, no file tabs. This is the default surface for `::tryit` and
+// `::exercise` directives in tish-learn.
+//
+// Behavior:
+//   - Compiles the editor contents through the bytecode VM via runVm().
+//   - When `expected` is null:    shows the captured stdout in a small <pre>.
+//   - When `expected` is a string: normalizes both sides and shows
+//                                  pass (green checkmark) or fail (two-pane diff).
+//   - On pass, calls onPass() exactly once per code change.
+//
+// Props:
+//   apiRef        : optional ref filled with { run() } so a parent can trigger runs.
+//   initialCode   : starting source.
+//   expected      : string|null — expected stdout (joined with "\n", trimmed).
+//   readonly      : if true, the editor is read-only.
+//   onPass        : optional fn() invoked when the code passes the expected check.
+
+import { useRef, useState, useLayoutEffect } from "lattish"
+import { EditorPanel } from "./EditorPanel.tish"
+import { runVm } from "./runtime/compileAndRun.tish"
+
+fn normalize(s) {
+  if (s === null || s === undefined) { return "" }
+  let t = String(s)
+  // collapse all line endings to \n, trim trailing whitespace on each line, trim outer.
+  let lines = t.split("\r\n").join("\n").split("\r").join("\n").split("\n")
+  let out = []
+  let i = 0
+  while (i < lines.length) {
+    let line = lines[i]
+    // rtrim
+    let j = line.length
+    while (j > 0) {
+      let c = line.charAt(j - 1)
+      if (c === " " || c === "\t") { j = j - 1 } else { break }
+    }
+    out.push(line.substring(0, j))
+    i = i + 1
+  }
+  // ltrim/rtrim outer empty lines
+  while (out.length > 0 && out[0] === "") { out.shift() }
+  while (out.length > 0 && out[out.length - 1] === "") { out.pop() }
+  return out.join("\n")
+}
+
+// Heuristic: turn raw error strings into a friendly title + body + hint.
+// We can't fully parse the message, so we look for common substrings.
+fn classifyError(msg, kind) {
+  let m = msg === null || msg === undefined ? "" : String(msg)
+  let title = "Error"
+  if (kind === "compile") { title = "Compile error" }
+  else if (kind === "runtime") { title = "Runtime error" }
+  let hint = null
+  if (m.indexOf("expected ')'") >= 0 || m.indexOf("Expected ')'") >= 0) {
+    hint = "Looks like a missing closing parenthesis. Check that every `(` has a matching `)`."
+  } else if (m.indexOf("expected ';'") >= 0 || m.indexOf("Expected ';'") >= 0) {
+    hint = "Tish is missing punctuation between two expressions. A newline or `;` between statements usually fixes this."
+  } else if (m.indexOf("expected '}'") >= 0 || m.indexOf("Expected '}'") >= 0) {
+    hint = "A `{` block didn't get closed. Look for a missing `}`."
+  } else if (m.indexOf("not defined") >= 0 || m.indexOf("not found") >= 0) {
+    hint = "You're using a name the program hasn't seen yet. Check spelling, or `let`/`const`-declare it before use."
+  } else if (m.indexOf("Cannot read property") >= 0 || m.indexOf("Cannot read properties") >= 0) {
+    hint = "A value was `null` or had no such property. Add a check before reading it (`if (x !== null) ...`)."
+  } else if (m.indexOf("Property") >= 0 && m.indexOf("not found") >= 0) {
+    hint = "Reading a property that doesn't exist on the object. Use `\"key\" in obj` to test, or `obj?.key` to short-circuit to `null`."
+  } else if (m.indexOf("not a function") >= 0) {
+    hint = "Tried to call something that isn't a function. Check the name and that it's been assigned a function value."
+  } else if (m.indexOf("Cannot divide by zero") >= 0) {
+    hint = "Division by zero — the divisor must not be 0."
+  }
+  return { title: title, body: m, hint: hint }
+}
+
+fn renderErrorStrip(result) {
+  let info = classifyError(result.err, result.errKind)
+  return <div class="mr-strip mr-strip-err">
+    <div class="mr-err-head">
+      <span class="mr-err-icon">{"!"}</span>
+      <span class="mr-err-title">{info.title}</span>
+    </div>
+    <pre class="mr-pre mr-err-body">{info.body}</pre>
+    {info.hint !== null ? <div class="mr-err-hint">{info.hint}</div> : null}
+  </div>
+}
+
+// Split into normalized lines (matching the same trimming runs against the
+// expected/actual comparison).
+fn splitLines(s) {
+  if (s === null || s === undefined || s === "") { return [] }
+  let t = String(s).split("\r\n").join("\n").split("\r").join("\n")
+  let lines = t.split("\n")
+  // Drop trailing empties from over-eager final newlines.
+  while (lines.length > 0 && lines[lines.length - 1] === "") { lines.pop() }
+  return lines
+}
+
+fn renderDiffStrip(actual, expected) {
+  let aLines = splitLines(actual)
+  let eLines = splitLines(expected)
+  let n = aLines.length > eLines.length ? aLines.length : eLines.length
+  let rows = []
+  let i = 0
+  let firstDiff = -1
+  while (i < n) {
+    let a = i < aLines.length ? aLines[i] : null
+    let e = i < eLines.length ? eLines[i] : null
+    let match = a !== null && e !== null && a === e
+    if (!match && firstDiff === -1) { firstDiff = i }
+    let cls = match ? "mr-diff-row mr-diff-match" : "mr-diff-row mr-diff-bad"
+    let mark = match ? "✓" : "✗"
+    rows.push(<div class={cls}>
+      <span class="mr-diff-mark">{mark}</span>
+      <span class="mr-diff-num">{String(i + 1)}</span>
+      <span class="mr-diff-actual">{a === null ? "(missing)" : a === "" ? "·" : a}</span>
+      <span class="mr-diff-arrow">{match ? "=" : "≠"}</span>
+      <span class="mr-diff-expected">{e === null ? "(extra)" : e === "" ? "·" : e}</span>
+    </div>)
+    i = i + 1
+  }
+  if (rows.length === 0) {
+    rows.push(<div class="mr-diff-row mr-diff-bad">
+      <span class="mr-diff-mark">{"✗"}</span>
+      <span class="mr-diff-num">{"1"}</span>
+      <span class="mr-diff-actual">{"(no output)"}</span>
+      <span class="mr-diff-arrow">{"≠"}</span>
+      <span class="mr-diff-expected">{"(empty)"}</span>
+    </div>)
+  }
+  return <div class="mr-strip mr-strip-fail">
+    <div class="mr-diff-header">
+      <span class="mr-diff-title">{"Output didn't match"}</span>
+      {firstDiff >= 0 ? <span class="mr-diff-hint">{"First difference: line " + String(firstDiff + 1)}</span> : null}
+    </div>
+    <div class="mr-diff-table-head">
+      <span class="mr-diff-mark" />
+      <span class="mr-diff-num">{"#"}</span>
+      <span class="mr-diff-actual">{"Your output"}</span>
+      <span class="mr-diff-arrow" />
+      <span class="mr-diff-expected">{"Expected"}</span>
+    </div>
+    <div class="mr-diff-table">{rows}</div>
+  </div>
+}
+
+export fn MiniRunner(props) {
+  let initialCode = props.initialCode !== undefined && props.initialCode !== null ? props.initialCode : ""
+  let expected = props.expected !== undefined ? props.expected : null
+  let onPass = props.onPass !== undefined ? props.onPass : null
+  let apiRef = props.apiRef !== undefined ? props.apiRef : null
+
+  let editorApi = useRef(null)
+  let busyState = useState(false)
+  let busy = busyState[0]
+  let setBusy = busyState[1]
+  let resultState = useState(null)   // { actual, ok, error?, ranOnce }
+  let result = resultState[0]
+  let setResult = resultState[1]
+  let passedRef = useRef(false)
+
+  fn doRun() {
+    if (busy) { return }
+    setBusy(true)
+    let src = editorApi.current !== null ? editorApi.current.getContent() : initialCode
+    let actual = ""
+    let err = null
+    let errKind = null
+    try {
+      let lines = runVm(src, "main.tish", null)
+      // The wasm-bindgen VM's run() catches runtime exceptions and prepends
+      // "Runtime: " to the captured stdout. Detect that here so the strip
+      // can label it as a runtime error rather than just "didn't match".
+      if (lines.length > 0) {
+        let last = lines[lines.length - 1]
+        if (typeof last === "string" && last.length >= 9 && last.substring(0, 9) === "Runtime: ") {
+          err = last.substring(9)
+          errKind = "runtime"
+          actual = lines.slice(0, lines.length - 1).join("\n")
+        }
+      }
+      if (err === null) { actual = lines.join("\n") }
+    } catch (e) {
+      err = String(e)
+      errKind = "compile"
+    }
+    let ok = false
+    if (err === null && expected !== null) {
+      ok = normalize(actual) === normalize(expected)
+      if (ok && !passedRef.current) {
+        passedRef.current = true
+        if (onPass !== null) { onPass() }
+      } else if (!ok) {
+        passedRef.current = false
+      }
+    }
+    setResult({ actual: actual, ok: ok, err: err, errKind: errKind, ranOnce: true })
+    setBusy(false)
+  }
+
+  useLayoutEffect(() => {
+    if (apiRef !== null && apiRef !== undefined) {
+      apiRef.current = { run: doRun }
+    }
+  }, [])
+
+  // Build the result strip
+  let strip = null
+  if (result === null) {
+    strip = <div class="mr-strip mr-strip-idle">{expected !== null ? "Click Run to check your answer" : "Click Run to see the output"}</div>
+  } else if (result.err !== null) {
+    strip = renderErrorStrip(result)
+  } else if (expected === null) {
+    strip = <div class="mr-strip mr-strip-out">
+      <div class="mr-strip-label">{"Output"}</div>
+      <pre class="mr-pre">{result.actual === "" ? "(no output)" : result.actual}</pre>
+    </div>
+  } else if (result.ok) {
+    strip = <div class="mr-strip mr-strip-ok">
+      <span class="mr-checkmark">{"✓"}</span>
+      <span>{"Correct!"}</span>
+    </div>
+  } else {
+    strip = renderDiffStrip(result.actual, expected)
+  }
+
+  return <div class="mr-root">
+    <div class="mr-editor">
+      {EditorPanel(editorApi, initialCode, "main.tish", null, null)}
+    </div>
+    <div class="mr-controls">
+      <button class="mr-run" onclick={doRun} disabled={busy}>{busy ? "Running…" : "Run"}</button>
+    </div>
+    {strip}
+  </div>
+}

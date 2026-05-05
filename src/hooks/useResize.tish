@@ -1,0 +1,70 @@
+// Hook for resizable split layout. Returns handlers and resize state for CSS.
+
+import { useState, useRef, useLayoutEffect } from "lattish"
+
+export fn useResize(bodyRef, layout, setLayout, saveLayout) {
+  let layoutRef = useRef(layout)
+  layoutRef.current = layout
+
+  let resizeModeState = useState(null)
+  let resizeMode = resizeModeState[0]
+  let setResizeMode = resizeModeState[1]
+
+  fn clampV(pct) {
+    if (pct < 20) { return 20 }
+    if (pct > 80) { return 80 }
+    return pct
+  }
+
+  fn clampH(pct) {
+    if (pct < 15) { return 15 }
+    if (pct > 85) { return 85 }
+    return pct
+  }
+
+  useLayoutEffect(() => {
+    if (resizeMode === null) { return }
+    let body = bodyRef !== null ? bodyRef.current : null
+    if (body === null) { setResizeMode(null); return }
+    let isV = resizeMode === "v"
+    fn onMove(e) {
+      let rect = body.getBoundingClientRect()
+      let cur = layoutRef.current
+      if (isV) {
+        let pct = clampV(((e.clientX - rect.left) / rect.width) * 100)
+        setLayout({ leftWidth: pct, terminalHeight: cur.terminalHeight })
+        saveLayout(pct, cur.terminalHeight)
+      } else {
+        let pct = clampH(((e.clientY - rect.top) / rect.height) * 100)
+        setLayout({ leftWidth: cur.leftWidth, terminalHeight: pct })
+        saveLayout(cur.leftWidth, pct)
+      }
+    }
+    fn onUp() {
+      setResizeMode(null)
+    }
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
+    fn cleanup() {
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+    }
+    return cleanup
+  }, [resizeMode])
+
+  fn startResizeV(e) {
+    if (e.button !== 0) { return }
+    e.preventDefault()
+    e.stopPropagation()
+    setResizeMode("v")
+  }
+
+  fn startResizeH(e) {
+    if (e.button !== 0) { return }
+    e.preventDefault()
+    e.stopPropagation()
+    setResizeMode("h")
+  }
+
+  return { startResizeV, startResizeH, resizeMode }
+}

@@ -1,0 +1,454 @@
+// Editor panel with syntax highlighting overlay. Modular, minimal, written in Tish.
+// Supports Tab indent (configurable), multi-line operations, duplicate/delete/toggle comment.
+// Undo/redo: ⌘/Ctrl+Z, ⌘/Ctrl+Shift+Z or ⌘/Ctrl+Y (beforeinput batches typing ~350ms).
+// Passes onKeydown for shell hotkeys when editor shortcuts don't apply.
+
+import { useRef, useLayoutEffect } from "lattish"
+
+const MAX_UNDO = 200
+const TX_GAP_MS = 350
+import { highlightToHtml } from "./highlight/TishHighlight.tish"
+
+const EDITOR_CONFIG_KEY = "tish-playground-editor-config"
+
+fn loadEditorConfig() {
+  try {
+    const raw = localStorage.getItem(EDITOR_CONFIG_KEY)
+    if (!raw) { return { indentStyle: "2", lineComment: "//" } }
+    let obj = JSON.parse(raw)
+    let style = obj.indentStyle
+    if (style !== "tab" && style !== "2" && style !== "4") { style = "2" }
+    return { indentStyle: style, lineComment: obj.lineComment !== undefined ? obj.lineComment : "//" }
+  } catch (_) { }
+  return { indentStyle: "2", lineComment: "//" }
+}
+
+fn getIndentString(config) {
+  if (config !== null && config !== undefined && config.indentStyle === "tab") { return "\t" }
+  if (config !== null && config !== undefined && config.indentStyle === "4") { return "    " }
+  return "  "
+}
+
+fn selectionToLineRange(value, start, end) {
+  let lines = value.split("\n")
+  let lineStart = 0
+  let pos = 0
+  let i = 0
+  while (i < lines.length) {
+    let len = lines[i].length + 1
+    if (pos + len > start) { lineStart = i; break }
+    pos = pos + len
+    i = i + 1
+  }
+  let lineEnd = lineStart
+  while (i < lines.length) {
+    let len = lines[i].length + 1
+    if (pos + len > end) { lineEnd = i; break }
+    pos = pos + len
+    i = i + 1
+  }
+  return { lineStart, lineEnd, lines }
+}
+
+fn indentLines(lines, lineStart, lineEnd, indentStr) {
+  let i = lineStart
+  while (i <= lineEnd) {
+    lines[i] = indentStr + lines[i]
+    i = i + 1
+  }
+}
+
+fn outdentLines(lines, lineStart, lineEnd, config) {
+  let removeLen = 1
+  if (config !== null && config !== undefined && config.indentStyle === "4") { removeLen = 4 }
+  else if (config !== null && config !== undefined && config.indentStyle !== "tab") { removeLen = 2 }
+  let i = lineStart
+  while (i <= lineEnd) {
+    let s = lines[i]
+    if (s.length > 0) {
+      if (s.charAt(0) === "\t") {
+        lines[i] = s.substring(1)
+      } else if (removeLen === 2 && s.length >= 2 && s.charAt(0) === " " && s.charAt(1) === " ") {
+        lines[i] = s.substring(2)
+      } else if (removeLen === 4 && s.length >= 4 && s.charAt(0) === " " && s.charAt(1) === " " && s.charAt(2) === " " && s.charAt(3) === " ") {
+        lines[i] = s.substring(4)
+      }
+    }
+    i = i + 1
+  }
+}
+
+fn getCommentPrefix(filePath) {
+  if (filePath !== null && filePath !== undefined && String(filePath).endsWith(".css")) { return "/*" }
+  return "//"
+}
+
+fn toggleLineComment(lines, lineStart, lineEnd, prefix) {
+  if (prefix === null || prefix === undefined || prefix === "") { return false }
+  if (prefix === "/*") {
+    let first = lines[lineStart]
+    let last = lines[lineEnd]
+    let isWrapped = first.length >= 3 && first.startsWith("/* ") && last.length >= 3 && last.endsWith(" */")
+    if (isWrapped) {
+      lines[lineStart] = first.substring(3)
+      lines[lineEnd] = last.substring(0, last.length - 3)
+    } else {
+      lines[lineStart] = "/* " + first
+      lines[lineEnd] = last + " */"
+    }
+    return true
+  }
+  let allCommented = true
+  let i = lineStart
+  while (i <= lineEnd) {
+    let s = lines[i]
+    if (s.length > 0) {
+      let ok = s.startsWith("// ") || s.startsWith("//")
+      if (!ok) { allCommented = false; break }
+    }
+    i = i + 1
+  }
+  let addComment = !allCommented
+  i = lineStart
+  while (i <= lineEnd) {
+    let s = lines[i]
+    if (addComment) {
+      lines[i] = "// " + s
+    } else {
+      if (s.startsWith("// ")) { lines[i] = s.substring(3) }
+      else if (s.startsWith("//")) { lines[i] = s.substring(2) }
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn editorSnapshot(ta) {
+  return { v: ta.value, a: ta.selectionStart, b: ta.selectionEnd }
+}
+
+fn applySnapshot(ta, s) {
+  ta.value = s.v
+  ta.selectionStart = s.a
+  ta.selectionEnd = s.b
+}
+
+export fn EditorPanel(apiRef, initialContent, filePath, onKeydown, editorConfig) {
+  let wrapperRef = useRef(null)
+  let taRef = useRef(null)
+  let highlightRef = useRef(null)
+  let gutterRef = useRef(null)
+  let scheduledRef = useRef(null)
+  let historyRef = useRef(null)
+  let pathRef = useRef(filePath !== undefined && filePath !== null ? filePath : "main.tish")
+  let config = editorConfig !== null && editorConfig !== undefined ? editorConfig : loadEditorConfig()
+
+  fn countLines(text) {
+    if (text === undefined || text === null || text === "") { return 1 }
+    let n = 1
+    let i = 0
+    while (i < text.length) {
+      if (text.charAt(i) === "\n") { n = n + 1 }
+      i = i + 1
+    }
+    return n
+  }
+
+  fn updateGutter(text) {
+    let g = gutterRef !== null && gutterRef !== undefined ? gutterRef.current : null
+    if (g === null) { return }
+    let inner = g.firstChild
+    if (inner === null || inner === undefined) {
+      inner = document.createElement("div")
+      inner.className = "pg-editor__gutter-inner"
+      g.appendChild(inner)
+    }
+    let n = countLines(text)
+    let nums = []
+    let i = 1
+    while (i <= n) {
+      nums.push(String(i))
+      i = i + 1
+    }
+    inner.textContent = nums.join("\n")
+  }
+
+  fn updateHighlight(text) {
+    let hi = highlightRef !== null && highlightRef !== undefined ? highlightRef.current : null
+    let path = pathRef !== null && pathRef !== undefined ? pathRef.current : "main.tish"
+    if (hi !== null && text !== undefined) {
+      hi.innerHTML = highlightToHtml(text, path)
+    }
+    updateGutter(text)
+  }
+
+  fn scheduleHighlight() {
+    if (scheduledRef !== null && scheduledRef !== undefined && scheduledRef.current !== null) { return }
+    scheduledRef.current = true
+    queueMicrotask(() => {
+      scheduledRef.current = null
+      let ta = taRef !== null && taRef !== undefined ? taRef.current : null
+      if (ta !== null) {
+        updateHighlight(ta.value)
+      }
+    })
+  }
+
+  fn syncScroll() {
+    let hi = highlightRef !== null && highlightRef !== undefined ? highlightRef.current : null
+    let ta = taRef !== null && taRef !== undefined ? taRef.current : null
+    let g = gutterRef !== null && gutterRef !== undefined ? gutterRef.current : null
+    if (hi !== null && ta !== null) {
+      hi.scrollTop = ta.scrollTop
+      hi.scrollLeft = ta.scrollLeft
+    }
+    if (g !== null && ta !== null) {
+      let inner = g.firstChild
+      if (inner !== null && inner !== undefined) {
+        inner.style.transform = "translateY(" + String(-ta.scrollTop) + "px)"
+      }
+    }
+  }
+
+  useLayoutEffect(() => {
+    if (filePath !== undefined && filePath !== null) { pathRef.current = filePath }
+    let ta = taRef !== null && taRef !== undefined ? taRef.current : null
+    let hi = highlightRef !== null && highlightRef !== undefined ? highlightRef.current : null
+    if (ta !== null && hi !== null) {
+      let H = historyRef.current
+      if (H === null || H === undefined) {
+        H = { undo: [], redo: [], lastTx: 0 }
+        historyRef.current = H
+      }
+      H.undo = []
+      H.redo = []
+      H.lastTx = 0
+      if (initialContent !== undefined && initialContent !== null) {
+        ta.value = initialContent
+        updateHighlight(initialContent)
+      }
+      fn pushUndoPoint(ta, H) {
+        let s = editorSnapshot(ta)
+        if (H.undo.length > 0) {
+          let top = H.undo[H.undo.length - 1]
+          if (top.v === s.v && top.a === s.a && top.b === s.b) { return }
+        }
+        H.undo.push(s)
+        if (H.undo.length > MAX_UNDO) { H.undo.shift() }
+        H.redo = []
+      }
+      fn maybePushTypingUndo(ta, H, e) {
+        if (e.isComposing) { return }
+        let now = Date.now()
+        if (now - H.lastTx > TX_GAP_MS) {
+          pushUndoPoint(ta, H)
+        }
+        H.lastTx = now
+      }
+      fn doUndo(ta, H) {
+        if (H.undo.length === 0) { return }
+        let cur = editorSnapshot(ta)
+        H.redo.push(cur)
+        let prev = H.undo.pop()
+        applySnapshot(ta, prev)
+        H.lastTx = 0
+        scheduleHighlight()
+        updateGutter(ta.value)
+      }
+      fn doRedo(ta, H) {
+        if (H.redo.length === 0) { return }
+        let cur = editorSnapshot(ta)
+        H.undo.push(cur)
+        if (H.undo.length > MAX_UNDO) { H.undo.shift() }
+        let next = H.redo.pop()
+        applySnapshot(ta, next)
+        H.lastTx = 0
+        scheduleHighlight()
+        updateGutter(ta.value)
+      }
+      ta.onbeforeinput = (e) => {
+        maybePushTypingUndo(ta, H, e)
+      }
+      ta.oninput = () => {
+        scheduleHighlight()
+      }
+      ta.onscroll = syncScroll
+      ta.onkeydown = (e) => {
+        let isMac = typeof navigator !== "undefined" && navigator.platform !== undefined && navigator.platform.toUpperCase().indexOf("MAC") >= 0
+        let mod = isMac ? e.metaKey : e.ctrlKey
+        let start = ta.selectionStart
+        let end = ta.selectionEnd
+        let value = ta.value
+        let range = selectionToLineRange(value, start, end)
+        let lineStart = range.lineStart
+        let lineEnd = range.lineEnd
+        let lines = range.lines
+
+        if (mod && e.key === "z" && !e.shiftKey) {
+          e.preventDefault()
+          doUndo(ta, H)
+          return
+        }
+        if (mod && (e.key === "y" || (e.key === "z" && e.shiftKey) || (e.key === "Z" && e.shiftKey))) {
+          e.preventDefault()
+          doRedo(ta, H)
+          return
+        }
+
+        if (e.key === "Tab" && !mod) {
+          pushUndoPoint(ta, H)
+          H.lastTx = Date.now()
+          e.preventDefault()
+          let indentStr = getIndentString(config)
+          if (e.shiftKey) {
+            outdentLines(lines, lineStart, lineEnd, config)
+          } else {
+            indentLines(lines, lineStart, lineEnd, indentStr)
+          }
+          let newValue = lines.join("\n")
+          ta.value = newValue
+          let offset = indentStr.length
+          if (e.shiftKey) { offset = 0 }
+          let newStart = 0
+          let j = 0
+          while (j < lineStart) {
+            newStart = newStart + lines[j].length + 1
+            j = j + 1
+          }
+          let newEnd = newStart
+          j = lineStart
+          while (j <= lineEnd) {
+            newEnd = newEnd + lines[j].length + 1
+            j = j + 1
+          }
+          newEnd = newEnd - 1
+          if (newEnd < 0) { newEnd = 0 }
+          ta.selectionStart = newStart
+          ta.selectionEnd = newEnd
+          scheduleHighlight()
+          updateGutter(ta.value)
+          return
+        }
+
+        if (mod && e.key === "d" && !e.shiftKey) {
+          e.preventDefault()
+          pushUndoPoint(ta, H)
+          H.lastTx = Date.now()
+          let dup = []
+          let k = lineStart
+          while (k <= lineEnd) {
+            dup.push(lines[k])
+            k = k + 1
+          }
+          let beforeLines = []
+          k = 0
+          while (k <= lineEnd) {
+            beforeLines.push(lines[k])
+            k = k + 1
+          }
+          let afterLines = []
+          k = lineEnd + 1
+          while (k < lines.length) {
+            afterLines.push(lines[k])
+            k = k + 1
+          }
+          let all = beforeLines.concat(dup).concat(afterLines)
+          ta.value = all.join("\n")
+          let newStart = 0
+          k = 0
+          while (k <= lineEnd) {
+            newStart = newStart + all[k].length + 1
+            k = k + 1
+          }
+          let newEnd = newStart
+          k = lineEnd + 1
+          while (k <= lineEnd + dup.length) {
+            newEnd = newEnd + all[k].length + 1
+            k = k + 1
+          }
+          newEnd = newEnd - 1
+          if (newEnd < 0) { newEnd = 0 }
+          ta.selectionStart = newStart
+          ta.selectionEnd = newEnd
+          scheduleHighlight()
+          updateGutter(ta.value)
+          return
+        }
+
+        if (mod && e.shiftKey && e.key === "K") {
+          e.preventDefault()
+          pushUndoPoint(ta, H)
+          H.lastTx = Date.now()
+          let beforeLines = []
+          let k = 0
+          while (k < lineStart) {
+            beforeLines.push(lines[k])
+            k = k + 1
+          }
+          let afterLines = []
+          k = lineEnd + 1
+          while (k < lines.length) {
+            afterLines.push(lines[k])
+            k = k + 1
+          }
+          let all = beforeLines.concat(afterLines)
+          ta.value = all.join("\n")
+          let newPos = 0
+          k = 0
+          while (k < lineStart && k < all.length) {
+            newPos = newPos + all[k].length + 1
+            k = k + 1
+          }
+          ta.selectionStart = newPos
+          ta.selectionEnd = newPos
+          scheduleHighlight()
+          updateGutter(ta.value)
+          return
+        }
+
+        if (mod && e.key === "/" && !e.shiftKey) {
+          e.preventDefault()
+          pushUndoPoint(ta, H)
+          H.lastTx = Date.now()
+          let path = pathRef !== null ? pathRef.current : "main.tish"
+          let prefix = config.lineComment !== undefined ? config.lineComment : getCommentPrefix(path)
+          if (toggleLineComment(lines, lineStart, lineEnd, prefix)) {
+            ta.value = lines.join("\n")
+            scheduleHighlight()
+            updateGutter(ta.value)
+          }
+          return
+        }
+
+        if (onKeydown !== null && onKeydown !== undefined) {
+          onKeydown(e)
+        }
+      }
+      if (apiRef !== null && apiRef !== undefined) {
+        apiRef.current = {
+          getContent: () => ta.value,
+          setContent: (t, path) => {
+            ta.value = t !== undefined && t !== null ? t : ""
+            if (path !== undefined && path !== null) { pathRef.current = path }
+            let h = historyRef.current
+            if (h !== null && h !== undefined) {
+              h.undo = []
+              h.redo = []
+              h.lastTx = 0
+            }
+            updateHighlight(ta.value)
+          },
+          setOnBlur: (callback) => { ta.onblur = callback }
+        }
+      }
+    }
+  }, [initialContent, filePath, onKeydown, editorConfig])
+
+  return <div ref={wrapperRef} class="pg-editor">
+    <div ref={gutterRef} class="pg-editor__gutter scrollbar-thin" />
+    <div class="pg-editor__content">
+      <div class="pg-editor__highlight scrollbar-thin" ref={highlightRef} />
+      <textarea ref={taRef} class="pg-editor__textarea scrollbar-thin" spellcheck="false" />
+    </div>
+  </div>
+}

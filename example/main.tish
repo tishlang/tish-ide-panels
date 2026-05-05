@@ -1,0 +1,50 @@
+// Minimal example: editor + terminal + Run button.
+// Mount with createRoot(document.body).render(App).
+
+import { createRoot, useRef, useState } from "lattish"
+import { EditorPanel, TerminalPanel, runCompileAndExec } from "tish-ide-panels"
+
+fn App() {
+  let editorApi = useRef(null)
+  let terminalApi = useRef(null)
+  let runIdRef = useRef(0)
+  let busyState = useState(false)
+  let busy = busyState[0]
+  let setBusy = busyState[1]
+
+  fn handleRun() {
+    if (busy) { return }
+    setBusy(true)
+    let src = editorApi.current.getContent()
+    let files = [{ path: "main.tish", text: src }]
+    runCompileAndExec({
+      files: files,
+      entryPath: "main.tish",
+      webPreview: false,
+      terminal: terminalApi.current,
+      preview: null,
+      runIdRef: runIdRef
+    }).then(() => setBusy(false))
+  }
+
+  return <div class="pg-root">
+    <header class="pg-header">
+      <h1 class="pg-title">{"tish-ide-panels example"}</h1>
+      <button class="pg-run" onclick={handleRun} disabled={busy}>{busy ? "Running…" : "Run"}</button>
+    </header>
+    <div class="pg-body">
+      <div class="pg-col pg-col-left">
+        <div class="pg-panel pg-panel-editor">
+          {EditorPanel(editorApi, "console.log(\"Hello, Tish!\")\n", "main.tish", null, null)}
+        </div>
+      </div>
+      <div class="pg-col pg-col-right">
+        <div class="pg-panel pg-panel-terminal">
+          {TerminalPanel(terminalApi)}
+        </div>
+      </div>
+    </div>
+  </div>
+}
+
+createRoot(document.body).render(App)

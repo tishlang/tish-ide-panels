@@ -1,0 +1,112 @@
+// StandalonePage — the page you land on when SandboxIde's "Open in new
+// window" button fires. Rehydrates the session payload, opens a matching
+// BroadcastChannel for two-way edit sync, and mounts a full-mode SandboxIde.
+//
+// Hosts:
+//   - tish-playground: not used (the playground page itself IS the standalone).
+//   - tish-learn: rendered by the #/sandbox route.
+//   - tish-ide (Tauri): mounted into apps/tauri-ide/sandbox.html.
+//
+// Props (all optional):
+//   sid           : session id (defaults to parsing location.hash).
+//   defaultFiles  : fallback when no payload is present in sessionStorage
+//                   (typical: a one-line "// new sandbox" placeholder).
+//   defaultEntry  : fallback entry path ("main.tish")
+//   defaultKind   : fallback kind ("ide")
+//   onOpenNewWindow: passed through to the inner SandboxIde so a Tauri host
+//                    can override the popup behavior even from the standalone
+//                    page (e.g. spawn another WebviewWindow).
+
+import { createRoot, useRef, useLayoutEffect } from "lattish"
+import {
+  SandboxIde,
+  readSandboxSession,
+  parseSandboxSid,
+  openSandboxBroadcast
+} from "./SandboxIde.tish"
+
+export fn StandalonePage(props) {
+  let propsSid = props.sid !== undefined ? props.sid : null
+  let defaultFiles = props.defaultFiles !== undefined && props.defaultFiles !== null
+    ? props.defaultFiles
+    : [{ path: "main.tish", text: "// New sandbox\nconsole.log(\"Hello, Tish!\")\n" }]
+  let defaultEntry = props.defaultEntry !== undefined && props.defaultEntry !== null ? props.defaultEntry : "main.tish"
+  let defaultKind = props.defaultKind !== undefined && props.defaultKind !== null ? props.defaultKind : "ide"
+  let onOpenNewWindow = props.onOpenNewWindow !== undefined ? props.onOpenNewWindow : null
+
+  let sid = propsSid
+  if (sid === null && typeof location !== "undefined") {
+    sid = parseSandboxSid(location.hash)
+    if (sid === null) { sid = parseSandboxSid(location.search) }
+  }
+
+  let payload = sid !== null ? readSandboxSession(sid) : null
+  let files = payload !== null && payload.files !== undefined ? payload.files : defaultFiles
+  let entryPath = payload !== null && payload.entryPath !== undefined && payload.entryPath !== null
+    ? payload.entryPath
+    : defaultEntry
+  let kind = payload !== null && payload.kind !== undefined && payload.kind !== null ? payload.kind : defaultKind
+  let cssEntryPath = payload !== null && payload.cssEntryPath !== undefined ? payload.cssEntryPath : null
+  let title = payload !== null && payload.title !== undefined && payload.title !== null
+    ? payload.title
+    : "Tish sandbox"
+
+  let apiRef = useRef(null)
+  let broadcastRef = useRef(null)
+
+  // Tabs: the union of file paths from the payload, in input order.
+  let tabPaths = []
+  let i = 0
+  while (i < files.length) {
+    tabPaths.push(files[i].path)
+    i = i + 1
+  }
+
+  // Two-way sync: subscribe to the same broadcast channel the opener uses.
+  useLayoutEffect(() => {
+    if (sid === null) { return () => {} }
+    let bc = openSandboxBroadcast(sid)
+    if (bc === null) { return () => {} }
+    broadcastRef.current = bc
+    bc.onmessage = (ev) => {
+      let d = ev.data
+      if (d === null || d === undefined || typeof d !== "object") { return }
+      if (d["type"] !== "files") { return }
+      // Avoid echoing our own broadcasts back.
+      let api = apiRef.current
+      if (api === null || api === undefined) { return }
+      api.setFiles(d.files)
+    }
+    return () => {
+      try { bc.close() } catch (_) { }
+      broadcastRef.current = null
+    }
+  }, [sid])
+
+  // Storage key keeps each popup's edits separate from any persistent
+  // playground-wide store — popups are scratch sessions tied to the sid.
+  let storageKey = sid !== null ? "tish-sandbox-popup::" + sid : null
+
+  return SandboxIde({
+    files: files,
+    entryPath: entryPath,
+    kind: kind,
+    mode: "full",
+    storageKey: storageKey,
+    cssEntryPath: cssEntryPath,
+    tabPaths: tabPaths,
+    title: title,
+    enableNewWindow: false,
+    onOpenNewWindow: onOpenNewWindow,
+    apiRef: apiRef
+  })
+}
+
+// Convenience mounter, mirroring `mountSandboxIde`.
+export fn mountStandalonePage(root, props) {
+  if (root === null || root === undefined) { return }
+  root.className = "pg-root"
+  let p = props !== undefined && props !== null ? props : {}
+  fn App() { return StandalonePage(p) }
+  createRoot(root).render(App)
+}

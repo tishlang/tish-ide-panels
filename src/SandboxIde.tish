@@ -1,0 +1,1357 @@
+// SandboxIde — full reusable in-browser sandbox-IDE shell.
+//
+// Wraps the editor / files / terminal / web-preview panels into a single
+// component with header chrome, layout splits, persistence, hotkeys, run
+// wiring, and the postMessage → terminal bridge. The same component drives:
+//
+//   - tish-playground (mode="full", own page)
+//   - tish-learn :::sandbox directives (mode="embed", inline in lessons)
+//   - tish-ide Tauri view (mode="embed", in a side panel)
+//   - the StandalonePage popup the "Open in new window" button launches
+//
+// Props (single object arg). All optional except `files`:
+//   files          : [{ path, text }]               initial buffers
+//   entryPath      : string  ("main.tish")          file to compile/run
+//   kind           : "console" | "ide" ("ide")      web-preview iframe on/off
+//   mode           : "embed" | "full" ("full")      controls header chrome + classes
+//   storageKey     : string|null  ("tish-playground")
+//                                                   namespace prefix for layout / files /
+//                                                   editor-config; null disables persistence
+//   cssEntryPath   : string|null  (null)            optional .css file in `files` whose
+//                                                   text is injected into the iframe head
+//   tabPaths       : string[]|null                  tabs shown in the editor chrome (defaults
+//                                                   to `files` paths in input order)
+//   showLayoutPresets : bool ("full" only) (true)   show Split / Editor / Output / Stacked
+//   showWebPreviewToggle : bool ("ide" only) (true) show "Lattish DOM" toggle
+//   enableNewWindow : bool (false)                  show "Open in new window" button
+//   onOpenNewWindow : ({url, sid, payload}) => bool  optional override; return true to
+//                                                   suppress the default window.open()
+//   newWindowUrl   : string  ("/sandbox")           URL the default opener navigates to
+//   enableShare    : bool (false)                   show Share / Embed / Fork buttons that
+//                                                   produce paste-able #share= URLs and
+//                                                   <iframe> embed snippets
+//   shareBaseUrl   : string|null                    base URL the Share/Embed buttons hang
+//                                                   the #share= payload off (defaults to
+//                                                   `${origin}${pathname}` of the host page)
+//   loadShareFromUrl : bool (true)                  on mount, look for #share= in
+//                                                   location.hash and rehydrate from it;
+//                                                   while a share is loaded, persistence
+//                                                   to localStorage is suppressed until Fork
+//   apiRef         : ref|null                       filled with { getFiles(), setFiles(files),
+//                                                   run(), focus(), getCurrentPath() }
+//
+// Public mounting helper:
+//   mountSandboxIde(rootEl, props)  — the same shape mountShell() had in
+//   tish-playground; sets `pg-root` className and hands off to createRoot.
+
+import { createRoot, useState, useRef, useLayoutEffect } from "lattish"
+
+import { EditorPanel } from "./EditorPanel.tish"
+import { TerminalPanel } from "./TerminalPanel.tish"
+import { FileBrowserPanel } from "./FileBrowserPanel.tish"
+import { WebPreviewPanel } from "./WebPreviewPanel.tish"
+import { runCompileAndExec } from "./runtime/compileAndRun.tish"
+
+// ---------------------------------------------------------------------------
+// Storage helpers. Each takes the SandboxIde's `storageKey`; when it is null
+// every read returns the supplied fallback and every write is a no-op so a
+// host with no persistence (e.g. a Tauri side panel) Just Works.
+// ---------------------------------------------------------------------------
+
+fn filesKey(storageKey)        { return storageKey + "::files" }
+fn layoutKey(storageKey)       { return storageKey + "::layout" }
+fn webPreviewKey(storageKey)   { return storageKey + "::webPreview" }
+fn editorConfigKey(storageKey) { return storageKey + "::editorConfig" }
+
+fn loadFilesFromStorage(storageKey, fileEntries) {
+  if (storageKey === null || storageKey === undefined) { return }
+  try {
+    const raw = localStorage.getItem(filesKey(storageKey))
+    if (!raw) { return }
+    const obj = JSON.parse(raw)
+    let i = 0
+    while (i < fileEntries.length) {
+      let e = fileEntries[i]
+      if (obj[e.path] !== undefined && obj[e.path] !== null) {
+        e.text = obj[e.path]
+      }
+      i = i + 1
+    }
+  } catch (_) { }
+}
+
+fn saveFilesToStorage(storageKey, fileEntries) {
+  if (storageKey === null || storageKey === undefined) { return }
+  try {
+    const obj = {}
+    let i = 0
+    while (i < fileEntries.length) {
+      let e = fileEntries[i]
+      obj[e.path] = e.text
+      i = i + 1
+    }
+    localStorage.setItem(filesKey(storageKey), JSON.stringify(obj))
+  } catch (_) { }
+}
+
+const LAYOUT_PRESETS = {
+  split:   { leftWidth: 50, terminalHeight: 50 },
+  editor:  { leftWidth: 70, terminalHeight: 40 },
+  output:  { leftWidth: 40, terminalHeight: 55 },
+  stacked: { leftWidth: 65, terminalHeight: 25 }
+}
+
+fn loadLayoutFromStorage(storageKey) {
+  if (storageKey === null || storageKey === undefined) { return null }
+  try {
+    const raw = localStorage.getItem(layoutKey(storageKey))
+    if (!raw) { return null }
+    let obj = JSON.parse(raw)
+    if (obj.leftWidth !== undefined && obj.terminalHeight !== undefined) {
+      let lw = obj.leftWidth
+      let th = obj.terminalHeight
+      if (typeof lw === "number" && lw >= 20 && lw <= 80 && typeof th === "number" && th >= 15 && th <= 85) {
+        return { leftWidth: lw, terminalHeight: th }
+      }
+    }
+  } catch (_) { }
+  return null
+}
+
+fn saveLayoutToStorage(storageKey, leftWidth, terminalHeight) {
+  if (storageKey === null || storageKey === undefined) { return }
+  try {
+    localStorage.setItem(layoutKey(storageKey), JSON.stringify({ leftWidth, terminalHeight }))
+  } catch (_) { }
+}
+
+fn loadWebPreviewFromStorage(storageKey) {
+  if (storageKey === null || storageKey === undefined) { return true }
+  try {
+    const raw = localStorage.getItem(webPreviewKey(storageKey))
+    if (!raw) { return true }
+    return JSON.parse(raw) !== false
+  } catch (_) { }
+  return true
+}
+
+fn saveWebPreviewToStorage(storageKey, value) {
+  if (storageKey === null || storageKey === undefined) { return }
+  try {
+    localStorage.setItem(webPreviewKey(storageKey), JSON.stringify(value))
+  } catch (_) { }
+}
+
+fn loadEditorConfigFromStorage(storageKey) {
+  if (storageKey === null || storageKey === undefined) { return { indentStyle: "2", lineComment: "//" } }
+  try {
+    const raw = localStorage.getItem(editorConfigKey(storageKey))
+    if (!raw) { return { indentStyle: "2", lineComment: "//" } }
+    let obj = JSON.parse(raw)
+    let style = obj.indentStyle
+    if (style !== "tab" && style !== "2" && style !== "4") { style = "2" }
+    return { indentStyle: style, lineComment: obj.lineComment !== undefined ? obj.lineComment : "//" }
+  } catch (_) { }
+  return { indentStyle: "2", lineComment: "//" }
+}
+
+// ---------------------------------------------------------------------------
+// Open-in-new-window protocol.
+//
+//   1. Caller generates a session id and a payload `{ files, entryPath, kind,
+//      cssEntryPath, openerId }`.
+//   2. Payload is stashed in sessionStorage under `tish-sandbox::<sid>` so the
+//      opened page can rehydrate even if it lands before any postMessage.
+//   3. A BroadcastChannel `tish-sandbox::<sid>` is opened on both sides for
+//      live two-way file sync (each side stamps messages with its own peerId
+//      and ignores its own echoes).
+//   4. The host's `onOpenNewWindow` (if provided) is invoked with the URL and
+//      payload; returning true suppresses the default window.open().
+//
+// Helpers below are exported because StandalonePage uses them too.
+// ---------------------------------------------------------------------------
+
+const SANDBOX_SESSION_PREFIX = "tish-sandbox::"
+const SANDBOX_BROADCAST_PREFIX = "tish-sandbox::"
+
+fn randomSid() {
+  if (typeof crypto !== "undefined" && crypto !== null && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
+  }
+  return "sid-" + String(Date.now()) + "-" + String(Math.floor(Math.random() * 1000000))
+}
+
+export fn writeSandboxSession(sid, payload) {
+  if (typeof sessionStorage === "undefined") { return }
+  try {
+    sessionStorage.setItem(SANDBOX_SESSION_PREFIX + sid, JSON.stringify(payload))
+  } catch (_) { }
+}
+
+export fn readSandboxSession(sid) {
+  if (typeof sessionStorage === "undefined") { return null }
+  try {
+    let raw = sessionStorage.getItem(SANDBOX_SESSION_PREFIX + sid)
+    if (raw === null || raw === undefined) { return null }
+    return JSON.parse(raw)
+  } catch (_) { }
+  return null
+}
+
+export fn openSandboxBroadcast(sid) {
+  if (typeof BroadcastChannel === "undefined") { return null }
+  try {
+    return new BroadcastChannel(SANDBOX_BROADCAST_PREFIX + sid)
+  } catch (_) {
+    return null
+  }
+}
+
+// Strip the leading "#sid=" / "?sid=" off a hash/search and return the bare id.
+export fn parseSandboxSid(hashOrSearch) {
+  if (hashOrSearch === null || hashOrSearch === undefined) { return null }
+  let s = String(hashOrSearch)
+  if (s.length === 0) { return null }
+  if (s.charAt(0) === "#" || s.charAt(0) === "?") { s = s.substring(1) }
+  let parts = s.split("&")
+  let i = 0
+  while (i < parts.length) {
+    let p = parts[i]
+    if (p.length > 4 && p.substring(0, 4) === "sid=") { return p.substring(4) }
+    i = i + 1
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Share-by-URL protocol (CodePen-style).
+//
+// A "share" payload is JSON of the form:
+//   { v: 1, files: [{path, text}, ...], entryPath, kind, cssEntryPath, title }
+//
+// We encode it as URL-safe base64 of the UTF-8 bytes (no compression — keeps
+// the codec synchronous and dependency-free; payloads of ~5KB stay under
+// URL length limits in every modern browser).
+//
+// Anyone receiving a `#share=<base64>` URL gets a fully self-contained sandbox
+// rehydrated in their browser — no backend, no account, no gist API.
+// ---------------------------------------------------------------------------
+
+const SHARE_HASH_KEY = "share"
+const SHARE_VERSION = 1
+
+// UTF-8 string → URL-safe base64 (RFC 4648 §5: + → -, / → _, no =).
+fn utf8ToBase64Url(s) {
+  if (typeof TextEncoder === "undefined") {
+    // Last-ditch fallback (deprecated but works for ASCII subsets).
+    let raw = btoa(unescape(encodeURIComponent(s)))
+    return raw.split("+").join("-").split("/").join("_").split("=").join("")
+  }
+  let bytes = new TextEncoder().encode(s)
+  let bin = ""
+  let i = 0
+  while (i < bytes.length) {
+    bin = bin + String.fromCharCode(bytes[i])
+    i = i + 1
+  }
+  let raw = btoa(bin)
+  return raw.split("+").join("-").split("/").join("_").split("=").join("")
+}
+
+// URL-safe base64 → UTF-8 string. Pads back to multiple of 4 before atob.
+fn base64UrlToUtf8(b) {
+  let s = b.split("-").join("+").split("_").join("/")
+  while (s.length % 4 !== 0) { s = s + "=" }
+  let bin = atob(s)
+  if (typeof TextDecoder === "undefined") {
+    return decodeURIComponent(escape(bin))
+  }
+  let bytes = new Uint8Array(bin.length)
+  let i = 0
+  while (i < bin.length) {
+    bytes[i] = bin.charCodeAt(i)
+    i = i + 1
+  }
+  return new TextDecoder().decode(bytes)
+}
+
+export fn encodeSharePayload(payload) {
+  let stamped = {
+    v: SHARE_VERSION,
+    files: payload.files,
+    entryPath: payload.entryPath !== undefined ? payload.entryPath : "main.tish",
+    kind: payload.kind !== undefined ? payload.kind : "ide",
+    cssEntryPath: payload.cssEntryPath !== undefined ? payload.cssEntryPath : null,
+    title: payload.title !== undefined ? payload.title : null
+  }
+  return utf8ToBase64Url(JSON.stringify(stamped))
+}
+
+export fn decodeSharePayload(encoded) {
+  if (encoded === null || encoded === undefined || encoded === "") { return null }
+  try {
+    let json = base64UrlToUtf8(encoded)
+    let obj = JSON.parse(json)
+    if (obj === null || typeof obj !== "object") { return null }
+    if (obj.v !== SHARE_VERSION) { return null }
+    if (!Array.isArray(obj.files)) { return null }
+    return obj
+  } catch (_) { }
+  return null
+}
+
+// Pull the `share=` value out of `location.hash` (or `?share=` in the search
+// string). Returns null when missing or malformed.
+export fn parseShareFromUrl(hashOrSearch) {
+  if (hashOrSearch === null || hashOrSearch === undefined) { return null }
+  let s = String(hashOrSearch)
+  if (s.length === 0) { return null }
+  if (s.charAt(0) === "#" || s.charAt(0) === "?") { s = s.substring(1) }
+  let parts = s.split("&")
+  let i = 0
+  let prefix = SHARE_HASH_KEY + "="
+  while (i < parts.length) {
+    let p = parts[i]
+    if (p.length > prefix.length && p.substring(0, prefix.length) === prefix) {
+      return p.substring(prefix.length)
+    }
+    i = i + 1
+  }
+  return null
+}
+
+// Read either window.location.hash or window.location.search and return a
+// decoded share payload (or null). Hash wins when both are present.
+export fn readShareFromLocation() {
+  if (typeof location === "undefined") { return null }
+  let fromHash = parseShareFromUrl(location.hash)
+  if (fromHash !== null) { return decodeSharePayload(fromHash) }
+  let fromSearch = parseShareFromUrl(location.search)
+  if (fromSearch !== null) { return decodeSharePayload(fromSearch) }
+  return null
+}
+
+// True when the URL has `?embed=1` or `#embed=1`.
+export fn isEmbedRequested() {
+  if (typeof location === "undefined") { return false }
+  let h = String(location.hash)
+  let s = String(location.search)
+  return (h.indexOf("embed=1") >= 0) || (s.indexOf("embed=1") >= 0)
+}
+
+// Build the URL the Share button copies. Strips any existing #share= /
+// ?embed= so re-sharing produces a clean, deterministic link.
+export fn buildShareUrl(baseUrl, encodedPayload, opts) {
+  let url = baseUrl
+  let hashIdx = url.indexOf("#")
+  if (hashIdx >= 0) { url = url.substring(0, hashIdx) }
+  let embed = opts !== undefined && opts !== null && opts.embed === true
+  if (embed) {
+    let qIdx = url.indexOf("?")
+    if (qIdx < 0) {
+      url = url + "?embed=1"
+    } else {
+      // Drop any existing embed= and re-append.
+      let head = url.substring(0, qIdx)
+      let tail = url.substring(qIdx + 1)
+      let kept = []
+      let i = 0
+      let parts = tail.split("&")
+      while (i < parts.length) {
+        if (parts[i].length > 0 && parts[i].substring(0, 6) !== "embed=") {
+          kept.push(parts[i])
+        }
+        i = i + 1
+      }
+      kept.push("embed=1")
+      url = head + "?" + kept.join("&")
+    }
+  }
+  return url + "#" + SHARE_HASH_KEY + "=" + encodedPayload
+}
+
+// ---------------------------------------------------------------------------
+// SandboxIde component.
+// ---------------------------------------------------------------------------
+
+fn findEntry(entries, path) {
+  let i = 0
+  while (i < entries.length) {
+    if (entries[i].path === path) { return entries[i] }
+    i = i + 1
+  }
+  return null
+}
+
+export fn SandboxIde(props) {
+  let initialFiles = props.files
+  let entryPath = props.entryPath !== undefined && props.entryPath !== null ? props.entryPath : "main.tish"
+  let kind = props.kind !== undefined && props.kind !== null ? props.kind : "ide"
+  let mode = props.mode !== undefined && props.mode !== null ? props.mode : "full"
+  let storageKey = props.storageKey !== undefined ? props.storageKey : "tish-playground"
+  let cssEntryPath = props.cssEntryPath !== undefined ? props.cssEntryPath : null
+  let providedTabs = props.tabPaths !== undefined && props.tabPaths !== null ? props.tabPaths : null
+  let showLayoutPresets = props.showLayoutPresets !== undefined ? props.showLayoutPresets : (mode === "full")
+  let showWebPreviewToggle = props.showWebPreviewToggle !== undefined ? props.showWebPreviewToggle : (mode === "full" && kind === "ide")
+  let enableNewWindow = props.enableNewWindow !== undefined ? props.enableNewWindow : false
+  let onOpenNewWindow = props.onOpenNewWindow !== undefined ? props.onOpenNewWindow : null
+  let newWindowUrl = props.newWindowUrl !== undefined && props.newWindowUrl !== null ? props.newWindowUrl : "/sandbox"
+  let enableShare = props.enableShare !== undefined ? props.enableShare : false
+  let providedShareBase = props.shareBaseUrl !== undefined && props.shareBaseUrl !== null ? props.shareBaseUrl : null
+  let loadShareFromUrl = props.loadShareFromUrl !== undefined ? props.loadShareFromUrl : true
+  let externalApiRef = props.apiRef !== undefined ? props.apiRef : null
+  let title = props.title !== undefined && props.title !== null ? props.title : "Tish playground"
+
+  // Detect a share=… URL and rehydrate from it BEFORE we touch localStorage —
+  // a fresh visitor opening a shared URL should see exactly that sandbox, not
+  // whatever happens to be in their browser storage from a previous session.
+  let urlShare = loadShareFromUrl ? readShareFromLocation() : null
+  let sourceFiles = initialFiles
+  if (urlShare !== null && Array.isArray(urlShare.files) && urlShare.files.length > 0) {
+    sourceFiles = urlShare.files
+    if (urlShare.entryPath !== undefined && urlShare.entryPath !== null) { entryPath = urlShare.entryPath }
+    if (urlShare.kind !== undefined && urlShare.kind !== null) { kind = urlShare.kind }
+    if (urlShare.cssEntryPath !== undefined) { cssEntryPath = urlShare.cssEntryPath }
+    if (urlShare.title !== undefined && urlShare.title !== null) { title = urlShare.title }
+  }
+  let shareModeRef = useRef(urlShare !== null)
+
+  let fileEntries = []
+  let i = 0
+  while (i < sourceFiles.length) {
+    fileEntries.push({ path: sourceFiles[i].path, text: sourceFiles[i].text })
+    i = i + 1
+  }
+  // Don't bleed local edits into a share-loaded view; the visitor sees the
+  // shared sandbox unmodified until they hit Fork.
+  if (!shareModeRef.current) {
+    loadFilesFromStorage(storageKey, fileEntries)
+  }
+  let fileEntriesRef = useRef(fileEntries)
+
+  let tabPaths = providedTabs
+  if (tabPaths === null) {
+    tabPaths = []
+    let j = 0
+    while (j < initialFiles.length) {
+      tabPaths.push(initialFiles[j].path)
+      j = j + 1
+    }
+  }
+  let tabPathsRef = useRef(tabPaths)
+
+  let currentPathRef = useRef(entryPath)
+  let currentPath = currentPathRef.current
+
+  let filesPanelRef = useRef(null)
+  let editorFilenameRef = useRef(null)
+  let editorTabsRef = useRef(null)
+  let bodyRef = useRef(null)
+  let editorApiRef = useRef(null)
+  let terminalApiRef = useRef(null)
+  let previewApiRef = useRef(null)
+  let previewStateRef = useRef(null)
+  let runButtonRef = useRef(null)
+  let runIdRef = useRef(0)
+  let peerIdRef = useRef(randomSid())
+  let broadcastRef = useRef(null)
+
+  let savedLayout = loadLayoutFromStorage(storageKey)
+  let defaultLeft = savedLayout !== null ? savedLayout.leftWidth : (kind === "ide" ? 50 : 100)
+  let defaultTerm = savedLayout !== null ? savedLayout.terminalHeight : (kind === "ide" ? 50 : 35)
+  let layoutRef = useRef({ leftWidth: defaultLeft, terminalHeight: defaultTerm })
+
+  let savedConfig = loadEditorConfigFromStorage(storageKey)
+  let editorConfigRef = useRef(savedConfig)
+
+  let webPreviewInitial = kind === "ide" ? loadWebPreviewFromStorage(storageKey) : false
+  let webPreviewState = useState(webPreviewInitial)
+  let webPreview = webPreviewState[0]
+  let setWebPreview = webPreviewState[1]
+
+  let curEntry = findEntry(fileEntriesRef.current, currentPath)
+  let currentContent = curEntry !== null ? curEntry.text : ""
+
+  fn snapshotFiles() {
+    let out = []
+    let k = 0
+    while (k < fileEntriesRef.current.length) {
+      let e = fileEntriesRef.current[k]
+      out.push({ path: e.path, text: e.text })
+      k = k + 1
+    }
+    return out
+  }
+
+  // Wrapper around saveFilesToStorage that suppresses writes while we're in
+  // share-loaded mode (so a visitor's local storage is never quietly clobbered
+  // by edits to someone else's shared sandbox until they hit Fork).
+  fn persistFiles() {
+    if (shareModeRef.current) { return }
+    saveFilesToStorage(storageKey, fileEntriesRef.current)
+  }
+
+  fn applyIncomingFiles(files) {
+    if (files === null || files === undefined) { return }
+    let k = 0
+    while (k < files.length) {
+      let incoming = files[k]
+      let target = findEntry(fileEntriesRef.current, incoming.path)
+      if (target !== null) {
+        target.text = incoming.text
+      } else {
+        fileEntriesRef.current.push({ path: incoming.path, text: incoming.text })
+      }
+      k = k + 1
+    }
+    persistFiles()
+    let editor = editorApiRef !== null ? editorApiRef.current : null
+    if (editor !== null && editor !== undefined) {
+      let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+      if (cur !== null) { editor.setContent(cur.text, currentPathRef.current) }
+    }
+  }
+
+  fn broadcastFiles() {
+    let bc = broadcastRef.current
+    if (bc === null || bc === undefined) { return }
+    try {
+      bc.postMessage({ type: "files", peerId: peerIdRef.current, files: snapshotFiles() })
+    } catch (_) { }
+  }
+
+  fn handleRun() {
+    let editor = editorApiRef !== null ? editorApiRef.current : null
+    let term = terminalApiRef !== null ? terminalApiRef.current : null
+    let prev = previewApiRef !== null ? previewApiRef.current : null
+    let btn = runButtonRef !== null ? runButtonRef.current : null
+    if (editor === null) { return }
+    if (btn !== null && btn.disabled) { return }
+    let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+    if (cur !== null) {
+      cur.text = editor.getContent()
+      persistFiles()
+      broadcastFiles()
+    }
+    let runPath = currentPathRef.current
+    if (cssEntryPath !== null && currentPathRef.current === cssEntryPath) {
+      runPath = entryPath
+    }
+    if (kind === "ide" && webPreview) {
+      runPath = entryPath
+    }
+    if (btn !== null) {
+      btn.disabled = true
+      btn.textContent = "Running…"
+    }
+    runCompileAndExec({
+      files: fileEntriesRef.current,
+      entryPath: runPath,
+      webPreview: kind === "ide" && webPreview,
+      terminal: term,
+      preview: prev,
+      runIdRef: runIdRef,
+      onDoneBtnRef: runButtonRef,
+      cssEntryPath: cssEntryPath
+    })
+  }
+
+  fn handleEditorKeydown(e) {
+    let isMac = typeof navigator !== "undefined" && navigator.platform !== undefined && navigator.platform.toUpperCase().indexOf("MAC") >= 0
+    let mod = isMac ? e.metaKey : e.ctrlKey
+    if (!mod) { return }
+    if (e.key === "s") {
+      e.preventDefault()
+      let editor = editorApiRef !== null ? editorApiRef.current : null
+      if (editor !== null) {
+        let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+        if (cur !== null) {
+          cur.text = editor.getContent()
+          persistFiles()
+          broadcastFiles()
+        }
+      }
+      return
+    }
+    if (e.key === "Enter") {
+      e.preventDefault()
+      handleRun()
+      return
+    }
+    if (e.key >= "1" && e.key <= "9") {
+      let idx = parseInt(e.key, 10) - 1
+      let paths = tabPathsRef.current
+      if (idx >= 0 && idx < paths.length) {
+        e.preventDefault()
+        onSelect(paths[idx])
+      }
+      return
+    }
+    if (e.key === "Tab") {
+      e.preventDefault()
+      let paths = tabPathsRef.current
+      let cur = currentPathRef.current
+      let idx = -1
+      let i = 0
+      while (i < paths.length) {
+        if (paths[i] === cur) { idx = i; break }
+        i = i + 1
+      }
+      if (e.shiftKey) {
+        idx = idx <= 0 ? paths.length - 1 : idx - 1
+      } else {
+        idx = idx >= paths.length - 1 ? 0 : idx + 1
+      }
+      onSelect(paths[idx])
+      return
+    }
+  }
+
+  // postMessage console bridge: web-preview iframes post `tish-console`
+  // messages stamped with the active runId; route them to the terminal.
+  useLayoutEffect(() => {
+    if (typeof window !== "undefined") {
+      let onMessage = (ev) => {
+        let d = ev.data
+        if (d !== null && d !== undefined && typeof d === "object" && d["type"] === "tish-console") {
+          let term = terminalApiRef !== null ? terminalApiRef.current : null
+          if (term !== null && d.id === runIdRef.current) {
+            term.appendLine(d.line !== undefined ? d.line : "")
+          }
+        }
+      }
+      window.addEventListener("message", onMessage)
+      return () => window.removeEventListener("message", onMessage)
+    }
+    return () => {}
+  }, [])
+
+  // Document-level hotkeys: ⌘S / ⌘↵ work even when the editor isn't focused.
+  useLayoutEffect(() => {
+    let onKeydown = (e) => {
+      let isMac = typeof navigator !== "undefined" && navigator.platform !== undefined && navigator.platform.toUpperCase().indexOf("MAC") >= 0
+      let mod = isMac ? e.metaKey : e.ctrlKey
+      if (!mod) { return }
+      if (e.key === "s") {
+        e.preventDefault()
+        let editor = editorApiRef !== null ? editorApiRef.current : null
+        if (editor !== null) {
+          let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+          if (cur !== null) {
+            cur.text = editor.getContent()
+            persistFiles()
+            broadcastFiles()
+          }
+        }
+      } else if (e.key === "Enter") {
+        e.preventDefault()
+        handleRun()
+      }
+    }
+    document.addEventListener("keydown", onKeydown)
+    return () => document.removeEventListener("keydown", onKeydown)
+  }, [])
+
+  // Layout vars + initial editor sync.
+  useLayoutEffect(() => {
+    let body = bodyRef.current
+    if (body !== null) {
+      body.style.setProperty("--left-width", String(layoutRef.current.leftWidth))
+      body.style.setProperty("--terminal-height", String(layoutRef.current.terminalHeight))
+    }
+    let applyEditorSync = () => {
+      let editor = editorApiRef !== null && editorApiRef !== undefined ? editorApiRef.current : null
+      if (editor === null || editor === undefined) { return }
+      let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+      if (cur !== null) { editor.setContent(cur.text, currentPathRef.current) }
+      let saveCurrentFile = () => {
+        let cur2 = findEntry(fileEntriesRef.current, currentPathRef.current)
+        let ed = editorApiRef !== null && editorApiRef !== undefined ? editorApiRef.current : null
+        if (cur2 !== null && ed !== null) {
+          cur2.text = ed.getContent()
+          persistFiles()
+          broadcastFiles()
+        }
+      }
+      editor.setOnBlur(saveCurrentFile)
+    }
+    let editor = editorApiRef !== null && editorApiRef !== undefined ? editorApiRef.current : null
+    if (editor !== null && editor !== undefined) {
+      applyEditorSync()
+    } else {
+      queueMicrotask(applyEditorSync)
+    }
+  }, [])
+
+  // Expose imperative API for embedders (Tauri view, popup BroadcastChannel).
+  useLayoutEffect(() => {
+    if (externalApiRef === null || externalApiRef === undefined) { return }
+    externalApiRef.current = {
+      getFiles: snapshotFiles,
+      setFiles: applyIncomingFiles,
+      run: handleRun,
+      focus: () => {
+        let editor = editorApiRef !== null ? editorApiRef.current : null
+        if (editor !== null && editor.focus !== undefined) { editor.focus() }
+      },
+      getCurrentPath: () => currentPathRef.current,
+      setCurrentPath: (p) => onSelect(p),
+      shareUrl: () => buildCurrentShareUrl({ embed: false }),
+      embedUrl: () => buildCurrentShareUrl({ embed: true }),
+      fork: handleFork,
+      isShareLoaded: () => shareModeRef.current
+    }
+  }, [])
+
+  fn startResizeV(e) {
+    if (e.button !== 0) { return }
+    e.preventDefault()
+    let body = bodyRef.current
+    if (body === null) { return }
+    let onMove = (m) => {
+      let rect = body.getBoundingClientRect()
+      let pct = ((m.clientX - rect.left) / rect.width) * 100
+      if (pct < 20) { pct = 20 }
+      if (pct > 80) { pct = 80 }
+      layoutRef.current = { leftWidth: pct, terminalHeight: layoutRef.current.terminalHeight }
+      saveLayoutToStorage(storageKey, pct, layoutRef.current.terminalHeight)
+      body.style.setProperty("--left-width", String(pct))
+    }
+    let onUp = () => {
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+    }
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
+  }
+
+  fn startResizeH(e) {
+    if (e.button !== 0) { return }
+    e.preventDefault()
+    let body = bodyRef.current
+    if (body === null) { return }
+    let onMove = (m) => {
+      let rect = body.getBoundingClientRect()
+      let pct = ((rect.bottom - m.clientY) / rect.height) * 100
+      if (pct < 15) { pct = 15 }
+      if (pct > 85) { pct = 85 }
+      layoutRef.current = { leftWidth: layoutRef.current.leftWidth, terminalHeight: pct }
+      saveLayoutToStorage(storageKey, layoutRef.current.leftWidth, pct)
+      body.style.setProperty("--terminal-height", String(pct))
+    }
+    let onUp = () => {
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+    }
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
+  }
+
+  fn onSelect(path) {
+    let editor = editorApiRef !== null && editorApiRef !== undefined ? editorApiRef.current : null
+    if (editor !== null && editor !== undefined) {
+      let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+      if (cur !== null) {
+        cur.text = editor.getContent()
+        persistFiles()
+        broadcastFiles()
+      }
+    }
+    currentPathRef.current = path
+    let cur = findEntry(fileEntriesRef.current, path)
+    if (editor !== null && cur !== null) {
+      editor.setContent(cur.text, path)
+      fn saveCurrentFile() {
+        let c = findEntry(fileEntriesRef.current, currentPathRef.current)
+        let ed = editorApiRef !== null && editorApiRef !== undefined ? editorApiRef.current : null
+        if (c !== null && ed !== null) {
+          c.text = ed.getContent()
+          persistFiles()
+          broadcastFiles()
+        }
+      }
+      editor.setOnBlur(saveCurrentFile)
+    }
+    let panel = filesPanelRef !== null && filesPanelRef !== undefined ? filesPanelRef.current : null
+    if (panel !== null) {
+      let btns = panel.querySelectorAll(".pg-files-item")
+      let j = 0
+      while (j < btns.length) {
+        let btn = btns[j]
+        let selected = btn.textContent === path
+        if (selected) {
+          btn.classList.add("pg-files-item-selected")
+        } else {
+          btn.classList.remove("pg-files-item-selected")
+        }
+        j = j + 1
+      }
+    }
+    let fnEl = editorFilenameRef !== null && editorFilenameRef !== undefined ? editorFilenameRef.current : null
+    if (fnEl !== null) { fnEl.textContent = path }
+    let tabsEl = editorTabsRef !== null && editorTabsRef !== undefined ? editorTabsRef.current : null
+    if (tabsEl !== null) {
+      let tabBtns = tabsEl.querySelectorAll(".pg-editor-chrome-tab")
+      let k = 0
+      while (k < tabBtns.length) {
+        let tb = tabBtns[k]
+        let sel = tb.textContent === path
+        if (sel) {
+          tb.classList.add("pg-editor-chrome-tab-active")
+        } else {
+          tb.classList.remove("pg-editor-chrome-tab-active")
+        }
+        k = k + 1
+      }
+    }
+  }
+
+  fn applyPreset(presetName) {
+    let p = LAYOUT_PRESETS[presetName]
+    if (p === undefined || p === null) { return }
+    layoutRef.current = { leftWidth: p.leftWidth, terminalHeight: p.terminalHeight }
+    saveLayoutToStorage(storageKey, p.leftWidth, p.terminalHeight)
+    let body = bodyRef.current
+    if (body !== null) {
+      body.style.setProperty("--left-width", String(p.leftWidth))
+      body.style.setProperty("--terminal-height", String(p.terminalHeight))
+    }
+  }
+
+  fn handleOpenInNewWindow() {
+    let sid = randomSid()
+    let payload = {
+      files: snapshotFiles(),
+      entryPath: entryPath,
+      kind: kind,
+      cssEntryPath: cssEntryPath,
+      title: title,
+      openerId: peerIdRef.current
+    }
+    writeSandboxSession(sid, payload)
+    // Wire a BroadcastChannel so the popup can sync its edits back.
+    if (broadcastRef.current === null) {
+      let bc = openSandboxBroadcast(sid)
+      if (bc !== null) {
+        bc.onmessage = (ev) => {
+          let d = ev.data
+          if (d === null || d === undefined || typeof d !== "object") { return }
+          if (d["type"] !== "files") { return }
+          if (d["peerId"] === peerIdRef.current) { return }
+          applyIncomingFiles(d.files)
+        }
+        broadcastRef.current = bc
+      }
+    }
+    let url = newWindowUrl
+    if (url.indexOf("#") >= 0) {
+      url = url + "&sid=" + sid
+    } else {
+      url = url + "#sid=" + sid
+    }
+    let handled = false
+    if (onOpenNewWindow !== null) {
+      try {
+        let r = onOpenNewWindow({ url: url, sid: sid, payload: payload })
+        if (r === true) { handled = true }
+      } catch (_) { }
+    }
+    if (!handled && typeof window !== "undefined") {
+      window.open(url, "_blank", "popup=true,width=1200,height=800")
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Share / Embed / Fork — codepen-style.
+  // ---------------------------------------------------------------------------
+
+  let toastTimerRef = useRef(null)
+
+  // Toast mounts on document.body directly (not on a SandboxIde-internal
+  // element) so it's always visible regardless of the host's nested layout
+  // and isn't affected by any `transform`/`overflow` ancestors that would
+  // otherwise constrain a `position:fixed` element.
+  fn showToast(message) {
+    if (typeof document === "undefined" || document.body === null) { return }
+    let prev = document.body.querySelector(".pg-toast")
+    if (prev !== null && prev !== undefined) { prev.remove() }
+    let el = document.createElement("div")
+    el.className = "pg-toast"
+    el.textContent = message
+    document.body.appendChild(el)
+    if (toastTimerRef.current !== null) {
+      clearTimeout(toastTimerRef.current)
+      toastTimerRef.current = null
+    }
+    toastTimerRef.current = setTimeout(() => {
+      if (el.parentNode !== null) { el.parentNode.removeChild(el) }
+      toastTimerRef.current = null
+    }, 2200)
+  }
+
+  // Modal that always opens when Share / Embed is clicked. The user gets to
+  // SEE and INTERACT with the value (URL or <iframe> snippet) regardless of
+  // whether clipboard access was granted — same UX as CodePen's share dialog.
+  //
+  // opts: {
+  //   title: "Share this sandbox" | "Embed this sandbox",
+  //   description: short blurb shown above the value,
+  //   value: the URL or snippet text,
+  //   isUrl: true to show the "Open in new tab" affordance,
+  //   secondary: optional [{label, value, description, isUrl}] for tabs (e.g.
+  //              add the embed snippet as a second tab on the share modal)
+  // }
+  let modalCloseRef = useRef(null)
+
+  fn closeShareModal() {
+    if (typeof document === "undefined" || document.body === null) { return }
+    let prev = document.body.querySelector(".pg-modal-host")
+    if (prev !== null && prev !== undefined) { prev.remove() }
+    if (modalCloseRef.current !== null) {
+      try { document.removeEventListener("keydown", modalCloseRef.current) } catch (_) { }
+      modalCloseRef.current = null
+    }
+  }
+
+  fn renderModalTab(parent, tabSpec, getActive, setActive, idx) {
+    let btn = document.createElement("button")
+    btn.className = idx === getActive() ? "pg-modal-tab pg-modal-tab-active" : "pg-modal-tab"
+    btn.textContent = tabSpec.label
+    btn.onclick = () => {
+      setActive(idx)
+      // Re-paint tab styles + body content.
+      let tabs = parent.parentNode.querySelectorAll(".pg-modal-tab")
+      let i = 0
+      while (i < tabs.length) {
+        if (i === idx) {
+          tabs[i].className = "pg-modal-tab pg-modal-tab-active"
+        } else {
+          tabs[i].className = "pg-modal-tab"
+        }
+        i = i + 1
+      }
+    }
+    parent.appendChild(btn)
+  }
+
+  fn showShareModal(opts) {
+    if (typeof document === "undefined" || document.body === null) { return }
+    closeShareModal()
+    let host = document.createElement("div")
+    host.className = "pg-modal-host"
+    host.onclick = (ev) => {
+      if (ev.target === host) { closeShareModal() }
+    }
+    let card = document.createElement("div")
+    card.className = "pg-modal pg-modal-share"
+
+    // Header with title + close button.
+    let head = document.createElement("div")
+    head.className = "pg-modal-head"
+    let h = document.createElement("h3")
+    h.className = "pg-modal-title"
+    h.textContent = opts.title !== undefined && opts.title !== null ? opts.title : "Share this sandbox"
+    let closeX = document.createElement("button")
+    closeX.className = "pg-modal-close"
+    closeX.setAttribute("aria-label", "Close")
+    closeX.textContent = "×"
+    closeX.onclick = () => { closeShareModal() }
+    head.appendChild(h)
+    head.appendChild(closeX)
+    card.appendChild(head)
+
+    // Build tab list. Single-tab modals just hide the tab strip.
+    let tabs = [{
+      label: opts.tabLabel !== undefined && opts.tabLabel !== null ? opts.tabLabel : "Link",
+      value: opts.value,
+      description: opts.description,
+      isUrl: opts.isUrl === true
+    }]
+    if (opts.secondary !== undefined && opts.secondary !== null && Array.isArray(opts.secondary)) {
+      let s = 0
+      while (s < opts.secondary.length) {
+        tabs.push(opts.secondary[s])
+        s = s + 1
+      }
+    }
+
+    let activeIdxRef = { v: 0 }
+    fn getActive() { return activeIdxRef.v }
+    fn setActive(v) { activeIdxRef.v = v; paintBody() }
+
+    let tabStrip = document.createElement("div")
+    tabStrip.className = "pg-modal-tabs"
+    if (tabs.length > 1) {
+      let ti = 0
+      while (ti < tabs.length) {
+        renderModalTab(tabStrip, tabs[ti], getActive, setActive, ti)
+        ti = ti + 1
+      }
+      card.appendChild(tabStrip)
+    }
+
+    // Body holder gets re-painted on tab switch.
+    let body = document.createElement("div")
+    body.className = "pg-modal-body"
+    card.appendChild(body)
+
+    fn paintBody() {
+      body.textContent = ""
+      let cur = tabs[activeIdxRef.v]
+      if (cur.description !== undefined && cur.description !== null && cur.description !== "") {
+        let d = document.createElement("p")
+        d.className = "pg-modal-desc"
+        d.textContent = cur.description
+        body.appendChild(d)
+      }
+      let ta = document.createElement("textarea")
+      ta.className = "pg-modal-value"
+      ta.spellcheck = false
+      ta.readOnly = true
+      ta.value = cur.value
+      ta.rows = cur.isUrl ? 2 : 4
+      body.appendChild(ta)
+      let row = document.createElement("div")
+      row.className = "pg-modal-actions"
+      let copyBtn = document.createElement("button")
+      copyBtn.className = "pg-modal-primary"
+      copyBtn.textContent = cur.isUrl ? "Copy link" : "Copy code"
+      let copyFlashTimer = null
+      copyBtn.onclick = () => {
+        ta.focus()
+        ta.select()
+        copyToClipboardAsync(cur.value).then((ok) => {
+          let original = cur.isUrl ? "Copy link" : "Copy code"
+          copyBtn.textContent = ok ? "✓ Copied" : "Press ⌘C / Ctrl-C"
+          if (copyFlashTimer !== null) { clearTimeout(copyFlashTimer) }
+          copyFlashTimer = setTimeout(() => {
+            copyBtn.textContent = original
+            copyFlashTimer = null
+          }, 1600)
+        })
+      }
+      row.appendChild(copyBtn)
+      if (cur.isUrl && typeof window !== "undefined" && typeof window.open === "function") {
+        let openBtn = document.createElement("button")
+        openBtn.className = "pg-modal-secondary"
+        openBtn.textContent = "Open in new tab ↗"
+        openBtn.onclick = () => { window.open(cur.value, "_blank") }
+        row.appendChild(openBtn)
+      }
+      let footnote = document.createElement("span")
+      footnote.className = "pg-modal-footnote"
+      footnote.textContent = String(cur.value.length) + " chars"
+      row.appendChild(footnote)
+      body.appendChild(row)
+      setTimeout(() => { try { ta.focus(); ta.select() } catch (_) { } }, 0)
+    }
+    paintBody()
+
+    host.appendChild(card)
+    document.body.appendChild(host)
+
+    // Esc closes. Stash the handler so we can detach on close.
+    fn onKey(ev) {
+      if (ev.key === "Escape") { closeShareModal() }
+    }
+    modalCloseRef.current = onKey
+    document.addEventListener("keydown", onKey)
+  }
+
+  fn currentShareBaseUrl() {
+    if (providedShareBase !== null) { return providedShareBase }
+    if (typeof location === "undefined") { return "" }
+    return String(location.origin) + String(location.pathname)
+  }
+
+  fn syncCurrentEditor() {
+    let editor = editorApiRef !== null ? editorApiRef.current : null
+    if (editor === null) { return }
+    let cur = findEntry(fileEntriesRef.current, currentPathRef.current)
+    if (cur !== null) { cur.text = editor.getContent() }
+  }
+
+  // Returns a Promise that resolves to true on successful copy, false otherwise.
+  // We can't get a synchronous answer from navigator.clipboard.writeText, and
+  // pretending we can leads to "Copied!" toasts when the clipboard is empty.
+  fn copyToClipboardAsync(text) {
+    if (typeof navigator !== "undefined" && navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === "function") {
+      try {
+        return navigator.clipboard.writeText(text).then(() => true, () => false)
+      } catch (_) { }
+    }
+    // Sync fallback (deprecated but still works in most browsers).
+    if (typeof document !== "undefined") {
+      try {
+        let ta = document.createElement("textarea")
+        ta.value = text
+        ta.style.position = "fixed"
+        ta.style.opacity = "0"
+        document.body.appendChild(ta)
+        ta.select()
+        let ok = typeof document.execCommand === "function" ? document.execCommand("copy") : false
+        ta.remove()
+        return Promise.resolve(ok === true)
+      } catch (_) { }
+    }
+    return Promise.resolve(false)
+  }
+
+  fn buildCurrentShareUrl(opts) {
+    syncCurrentEditor()
+    let payload = {
+      files: snapshotFiles(),
+      entryPath: entryPath,
+      kind: kind,
+      cssEntryPath: cssEntryPath,
+      title: title
+    }
+    let encoded = encodeSharePayload(payload)
+    return buildShareUrl(currentShareBaseUrl(), encoded, opts)
+  }
+
+  fn buildEmbedSnippet(url) {
+    return "<iframe src=\"" + url + "\" style=\"width:100%;height:480px;border:1px solid #ccc;border-radius:6px\" sandbox=\"allow-scripts allow-same-origin\"></iframe>"
+  }
+
+  fn handleShare() {
+    let url = ""
+    let embedUrl = ""
+    try {
+      url = buildCurrentShareUrl({ embed: false })
+      embedUrl = buildCurrentShareUrl({ embed: true })
+    } catch (e) {
+      if (typeof console !== "undefined") { console.error("[SandboxIde] Share failed:", e) }
+      showToast("Share failed — see console")
+      return
+    }
+    if (typeof console !== "undefined") { console.log("[SandboxIde] Share URL:", url) }
+    let snippet = buildEmbedSnippet(embedUrl)
+    showShareModal({
+      title: "Share this sandbox",
+      tabLabel: "Link",
+      value: url,
+      isUrl: true,
+      description: "Anyone with this link gets the same sandbox in their browser. No backend, no account — the entire pen lives in the URL.",
+      secondary: [{
+        label: "Embed",
+        value: snippet,
+        isUrl: false,
+        description: "Drop this <iframe> snippet into any HTML page to embed the sandbox at 480px height."
+      }]
+    })
+  }
+
+  fn handleEmbed() {
+    let url = ""
+    try { url = buildCurrentShareUrl({ embed: true }) }
+    catch (e) {
+      if (typeof console !== "undefined") { console.error("[SandboxIde] Embed failed:", e) }
+      showToast("Embed failed — see console")
+      return
+    }
+    let snippet = buildEmbedSnippet(url)
+    if (typeof console !== "undefined") { console.log("[SandboxIde] Embed snippet:", snippet) }
+    showShareModal({
+      title: "Embed this sandbox",
+      tabLabel: "Snippet",
+      value: snippet,
+      isUrl: false,
+      description: "Drop this <iframe> into any HTML page to embed the sandbox inline at 480px height. The snippet is self-contained — visitors can edit and Run in-place.",
+      secondary: [{
+        label: "Direct URL",
+        value: url,
+        isUrl: true,
+        description: "Or open this URL directly in any browser (use ?embed=1 to render in embed mode)."
+      }]
+    })
+  }
+
+  fn handleFork() {
+    syncCurrentEditor()
+    shareModeRef.current = false
+    persistFiles()
+    saveLayoutToStorage(storageKey, layoutRef.current.leftWidth, layoutRef.current.terminalHeight)
+    // Strip ?embed=1 / #share=… from the URL so a refresh stays on the fork.
+    if (typeof history !== "undefined" && history.replaceState !== undefined && typeof location !== "undefined") {
+      try {
+        let clean = String(location.origin) + String(location.pathname)
+        history.replaceState(null, "", clean)
+      } catch (_) { }
+    }
+    showToast("Forked — your edits are now private")
+  }
+
+  // Header chrome (varies by mode).
+  fn renderHeader() {
+    if (mode === "embed") {
+      // Embed mode: tight toolbar with run + optional share/new-window.
+      let actions = []
+      if (enableShare) {
+        if (shareModeRef.current) {
+          actions.push(<button class="pg-toggle pg-fork" onclick={handleFork} title="Make this sandbox your own (saves to local storage)">{"⑂ Fork"}</button>)
+        }
+        actions.push(<button class="pg-toggle pg-share" onclick={handleShare} title="Copy a link that recreates this sandbox in any browser">{"↗ Share"}</button>)
+      }
+      if (enableNewWindow) {
+        actions.push(<button class="pg-toggle pg-newwin" onclick={handleOpenInNewWindow} title="Open this sandbox in a new window">{"⇱ New window"}</button>)
+      }
+      actions.push(<button ref={runButtonRef} class="pg-run" onclick={handleRun}>{"Run"}</button>)
+      return <header class="pg-header pg-header-embed">
+        <div class="pg-header-actions">{actions}</div>
+      </header>
+    }
+
+    // Full mode: full chrome.
+    let presets = null
+    if (showLayoutPresets) {
+      presets = <div class="pg-layout-presets">
+        <button class="pg-layout-btn" onclick={() => applyPreset("split")} title="Split layout">{"Split"}</button>
+        <button class="pg-layout-btn" onclick={() => applyPreset("editor")} title="Editor focus">{"Editor"}</button>
+        <button class="pg-layout-btn" onclick={() => applyPreset("output")} title="Output focus">{"Output"}</button>
+        <button class="pg-layout-btn" onclick={() => applyPreset("stacked")} title="Stacked">{"Stacked"}</button>
+      </div>
+    }
+    let webToggle = null
+    if (showWebPreviewToggle) {
+      webToggle = <button
+        class={webPreview ? "pg-toggle pg-toggle-lattish pg-toggle-on" : "pg-toggle pg-toggle-lattish"}
+        onclick={() => { let v = !webPreview; setWebPreview(v); saveWebPreviewToStorage(storageKey, v) }}
+        title="On: compile to JS with Lattish, run in web preview. Off: pure VM, console only.">{"Lattish DOM"}</button>
+    }
+    let newWinBtn = null
+    if (enableNewWindow) {
+      newWinBtn = <button class="pg-toggle pg-newwin" onclick={handleOpenInNewWindow} title="Open this sandbox in a new window">{"⇱ New window"}</button>
+    }
+    let shareBtns = null
+    if (enableShare) {
+      let forkBtn = null
+      if (shareModeRef.current) {
+        forkBtn = <button class="pg-toggle pg-fork" onclick={handleFork} title="Make this sandbox your own (saves to local storage)">{"⑂ Fork"}</button>
+      }
+      shareBtns = <div class="pg-share-group">
+        {forkBtn}
+        <button class="pg-toggle pg-share" onclick={handleShare} title="Copy a link that recreates this sandbox in any browser">{"↗ Share"}</button>
+        <button class="pg-toggle pg-embed-btn" onclick={handleEmbed} title="Copy an <iframe> snippet that embeds this sandbox in any page">{"⌬ Embed"}</button>
+      </div>
+    }
+    let shareBadge = null
+    if (shareModeRef.current) {
+      shareBadge = <span class="pg-share-badge" title="You're viewing a shared sandbox. Edits won't save to your browser until you Fork.">{"shared"}</span>
+    }
+    return <header class="pg-header">
+      <h1 class="pg-title">{title}</h1>
+      {shareBadge}
+      <div class="pg-header-actions">
+        {presets}
+        {webToggle}
+        {shareBtns}
+        {newWinBtn}
+        <span class="pg-hotkeys" title="Save / Run / Undo / Redo">{"⌘S ⌘↵ · ⌘Z ⇧⌘Z"}</span>
+        <button ref={runButtonRef} class="pg-run" onclick={handleRun}>{"Run"}</button>
+      </div>
+    </header>
+  }
+
+  // Editor tabs row inside the editor chrome.
+  fn renderTabs() {
+    let tabs = []
+    let k = 0
+    while (k < tabPathsRef.current.length) {
+      let p = tabPathsRef.current[k]
+      let cls = currentPath === p ? "pg-editor-chrome-tab pg-editor-chrome-tab-active" : "pg-editor-chrome-tab"
+      tabs.push(<button class={cls} onclick={() => onSelect(p)}>{p}</button>)
+      k = k + 1
+    }
+    return <div ref={editorTabsRef} class="pg-editor-chrome-tabs">{tabs}</div>
+  }
+
+  let rootClass = mode === "embed" ? "pg-root pg-embed" : "pg-root"
+  if (kind === "console") { rootClass = rootClass + " pg-kind-console" }
+  let bodyClass = "pg-body"
+  if (kind === "console") { bodyClass = bodyClass + " pg-body-console" }
+
+  let leftSide = <div class="pg-col pg-col-left">
+    <div ref={filesPanelRef} class="pg-panel pg-panel-files">
+      {FileBrowserPanel(tabPathsRef.current, currentPath, onSelect)}
+    </div>
+    <div class="pg-panel pg-panel-editor">
+      <div class="pg-editor-chrome">
+        <div class="pg-editor-chrome-header">
+          <div class="pg-editor-chrome-dots">
+            <div class="pg-editor-chrome-dot" />
+            <div class="pg-editor-chrome-dot" />
+            <div class="pg-editor-chrome-dot" />
+          </div>
+          <span ref={editorFilenameRef} class="pg-editor-chrome-filename">{currentPath}</span>
+          {renderTabs()}
+        </div>
+        <div class="pg-editor-chrome-body">
+          {EditorPanel(editorApiRef, currentContent, currentPath, handleEditorKeydown, editorConfigRef.current)}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  let rightSide = null
+  if (kind === "ide") {
+    rightSide = <div class="pg-col pg-col-right">
+      <div class="pg-panel pg-panel-preview">
+        {WebPreviewPanel(previewApiRef, previewStateRef)}
+      </div>
+      <div class="pg-resize-h" role="separator" ariaOrientation="horizontal" onmousedown={startResizeH} />
+      <div class="pg-panel pg-panel-terminal">
+        {TerminalPanel(terminalApiRef)}
+      </div>
+    </div>
+  } else {
+    // Console mode: no preview, terminal stacks vertically beneath editor.
+    rightSide = null
+  }
+
+  if (kind === "console") {
+    return <div class={rootClass}>
+      {renderHeader()}
+      <div ref={bodyRef} class={bodyClass}>
+        <div class="pg-panel pg-panel-editor">
+          <div class="pg-editor-chrome">
+            <div class="pg-editor-chrome-header">
+              <div class="pg-editor-chrome-dots">
+                <div class="pg-editor-chrome-dot" />
+                <div class="pg-editor-chrome-dot" />
+                <div class="pg-editor-chrome-dot" />
+              </div>
+              <span ref={editorFilenameRef} class="pg-editor-chrome-filename">{currentPath}</span>
+              {renderTabs()}
+            </div>
+            <div class="pg-editor-chrome-body">
+              {EditorPanel(editorApiRef, currentContent, currentPath, handleEditorKeydown, editorConfigRef.current)}
+            </div>
+          </div>
+        </div>
+        <div class="pg-resize-h" role="separator" ariaOrientation="horizontal" onmousedown={startResizeH} />
+        <div class="pg-panel pg-panel-terminal">
+          {TerminalPanel(terminalApiRef)}
+        </div>
+      </div>
+    </div>
+  }
+
+  return <div class={rootClass}>
+    {renderHeader()}
+    <div ref={bodyRef} class={bodyClass}>
+      {leftSide}
+      <div class="pg-resize-v" role="separator" ariaOrientation="vertical" onmousedown={startResizeV} />
+      {rightSide}
+    </div>
+  </div>
+}
+
+// Convenience mounter. Kept for parity with the old `mountShell(root)` API
+// in tish-playground/app/shell.tish.
+export fn mountSandboxIde(root, props) {
+  if (root === null || root === undefined) { return }
+  root.className = "pg-root"
+  fn App() { return SandboxIde(props) }
+  createRoot(root).render(App)
+}

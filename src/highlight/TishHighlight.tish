@@ -1,0 +1,279 @@
+// Syntax highlighting for Tish/JSX and CSS. Aligned with tish-vscode TextMate grammars.
+// Modular, minimal, written in Tish — no external deps.
+
+fn escapeHtml(s) {
+  let x = s.split("&").join("&amp;")
+  x = x.split("<").join("&lt;")
+  x = x.split(">").join("&gt;")
+  return x
+}
+
+fn span(cls, text) {
+  return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
+}
+
+fn tryMatch(str, pattern) {
+  if (typeof RegExp === "undefined" || typeof str.match !== "function") { return null }
+  let m = str.match(pattern)
+  return m
+}
+
+// Tokenize a line of Tish/JS and return HTML. Uses RegExp when available.
+fn tokenizeTishLine(line) {
+  if (typeof RegExp === "undefined") {
+    return escapeHtml(line)
+  }
+  let out = ""
+  let i = 0
+  let KEYWORD = RegExp("^(if|else|while|for|do|return|break|continue|switch|case|default|throw|try|catch|finally|import|export|from|of|in|typeof|void|async|await)\\b", "")
+  let STORAGE = RegExp("^(fn|function|let|const)\\b", "")
+  let LITERAL = RegExp("^(true|false|null)\\b", "")
+  let TYPE = RegExp("^(number|string|boolean|null|void|any)\\b", "")
+  let HEX = RegExp("^0[xX][0-9a-fA-F]+", "")
+  let NUM = RegExp("^\\d+(\\.\\d+)?([eE][+-]?\\d+)?", "")
+  let IDENT = RegExp("^[a-zA-Z_$][a-zA-Z0-9_$]*", "")
+  while (i < line.length) {
+    let rest = line.substring(i)
+    let ws = tryMatch(rest, RegExp("^\\s+", ""))
+    if (ws) {
+      out = out + escapeHtml(ws[0])
+      i = i + ws[0].length
+      continue
+    }
+    if (rest.charAt(0) === "/" && rest.charAt(1) === "/") {
+      out = out + span("hl-comment", rest)
+      break
+    }
+    if (rest.charAt(0) === "/" && rest.charAt(1) === "*") {
+      let end = rest.indexOf("*/", 2)
+      if (end < 0) { end = rest.length } else { end = end + 2 }
+      out = out + span("hl-comment", rest.substring(0, end))
+      i = i + end
+      continue
+    }
+    if (rest.charAt(0) === "\"") {
+      let j = 1
+      while (j < rest.length) {
+        let c = rest.charAt(j)
+        if (c === "\\") { j = j + 2; continue }
+        if (c === "\"") { j = j + 1; break }
+        j = j + 1
+      }
+      out = out + span("hl-string", rest.substring(0, j))
+      i = i + j
+      continue
+    }
+    if (rest.charAt(0) === "'") {
+      let j = 1
+      while (j < rest.length) {
+        let c = rest.charAt(j)
+        if (c === "\\") { j = j + 2; continue }
+        if (c === "'") { j = j + 1; break }
+        j = j + 1
+      }
+      out = out + span("hl-string", rest.substring(0, j))
+      i = i + j
+      continue
+    }
+    if (rest.charAt(0) === "`") {
+      let j = 1
+      while (j < rest.length) {
+        let c = rest.charAt(j)
+        if (c === "\\") { j = j + 2; continue }
+        if (c === "`") { j = j + 1; break }
+        if (c === "$" && rest.charAt(j + 1) === "{") {
+          let depth = 1
+          j = j + 2
+          while (j < rest.length && depth > 0) {
+            if (rest.charAt(j) === "{") { depth = depth + 1 }
+            else if (rest.charAt(j) === "}") { depth = depth - 1 }
+            j = j + 1
+          }
+          continue
+        }
+        j = j + 1
+      }
+      out = out + span("hl-string", rest.substring(0, j))
+      i = i + j
+      continue
+    }
+    if (rest.charAt(0) === "<" && rest.length > 1 && ((rest.charAt(1) >= "a" && rest.charAt(1) <= "z") || (rest.charAt(1) >= "A" && rest.charAt(1) <= "Z") || rest.charAt(1) === "_" || rest.charAt(1) === "/")) {
+      let tag = tryMatch(rest, RegExp("^<\\/?([a-zA-Z_][a-zA-Z0-9_.-]*)", ""))
+      if (tag) {
+        out = out + span("hl-punctuation", rest.charAt(0))
+        if (rest.charAt(1) === "/") {
+          out = out + span("hl-punctuation", "/")
+          out = out + span("hl-tag", tag[1])
+        } else {
+          out = out + span("hl-tag", tag[1])
+        }
+        i = i + tag[0].length
+        continue
+      }
+    }
+    let kw = tryMatch(rest, KEYWORD)
+    if (kw) {
+      out = out + span("hl-keyword", kw[0])
+      i = i + kw[0].length
+      continue
+    }
+    let st = tryMatch(rest, STORAGE)
+    if (st) {
+      out = out + span("hl-storage", st[0])
+      i = i + st[0].length
+      continue
+    }
+    let lit = tryMatch(rest, LITERAL)
+    if (lit) {
+      out = out + span("hl-literal", lit[0])
+      i = i + lit[0].length
+      continue
+    }
+    let typ = tryMatch(rest, TYPE)
+    if (typ) {
+      out = out + span("hl-type", typ[0])
+      i = i + typ[0].length
+      continue
+    }
+    let hex = tryMatch(rest, HEX)
+    if (hex) {
+      out = out + span("hl-number", hex[0])
+      i = i + hex[0].length
+      continue
+    }
+    let num = tryMatch(rest, NUM)
+    if (num) {
+      out = out + span("hl-number", num[0])
+      i = i + num[0].length
+      continue
+    }
+    let arrow = rest.substring(0, 2) === "=>"
+    if (arrow) {
+      out = out + span("hl-operator", "=>")
+      i = i + 2
+      continue
+    }
+    let ident = tryMatch(rest, IDENT)
+    if (ident) {
+      out = out + span("hl-ident", ident[0])
+      i = i + ident[0].length
+      continue
+    }
+    let punct = tryMatch(rest, RegExp("^[(){}\\[\\].,;:=+\\-*\\/%<>!|&?]", ""))
+    if (punct) {
+      out = out + span("hl-punctuation", punct[0])
+      i = i + punct[0].length
+      continue
+    }
+    out = out + escapeHtml(rest.charAt(0))
+    i = i + 1
+  }
+  return out
+}
+
+fn tokenizeCssLine(line) {
+  if (typeof RegExp === "undefined") {
+    return escapeHtml(line)
+  }
+  let out = ""
+  let i = 0
+  let SEL_ID = RegExp("^#[a-zA-Z_][a-zA-Z0-9_-]*", "")
+  let SEL_CLASS = RegExp("^\\.[a-zA-Z_][a-zA-Z0-9_-]*", "")
+  let NUM = RegExp("^-?\\d+(\\.\\d+)?(px|em|rem|%|deg)?", "")
+  let HEX_COLOR = RegExp("^#[0-9a-fA-F]{3,8}\\b", "")
+  while (i < line.length) {
+    let rest = line.substring(i)
+    let ws = tryMatch(rest, RegExp("^\\s+", ""))
+    if (ws) {
+      out = out + escapeHtml(ws[0])
+      i = i + ws[0].length
+      continue
+    }
+    if (rest.charAt(0) === "/" && rest.charAt(1) === "*") {
+      let end = rest.indexOf("*/", 2)
+      if (end < 0) { end = rest.length } else { end = end + 2 }
+      out = out + span("hl-comment", rest.substring(0, end))
+      i = i + end
+      continue
+    }
+    if (rest.charAt(0) === "\"") {
+      let j = 1
+      while (j < rest.length) {
+        let c = rest.charAt(j)
+        if (c === "\\") { j = j + 2; continue }
+        if (c === "\"") { j = j + 1; break }
+        j = j + 1
+      }
+      out = out + span("hl-string", rest.substring(0, j))
+      i = i + j
+      continue
+    }
+    if (rest.charAt(0) === "'") {
+      let j = 1
+      while (j < rest.length) {
+        let c = rest.charAt(j)
+        if (c === "\\") { j = j + 2; continue }
+        if (c === "'") { j = j + 1; break }
+        j = j + 1
+      }
+      out = out + span("hl-string", rest.substring(0, j))
+      i = i + j
+      continue
+    }
+    let id = tryMatch(rest, SEL_ID)
+    if (id) {
+      out = out + span("hl-selector-id", id[0])
+      i = i + id[0].length
+      continue
+    }
+    let cls = tryMatch(rest, SEL_CLASS)
+    if (cls) {
+      out = out + span("hl-selector-class", cls[0])
+      i = i + cls[0].length
+      continue
+    }
+    let hex = tryMatch(rest, HEX_COLOR)
+    if (hex) {
+      out = out + span("hl-color", hex[0])
+      i = i + hex[0].length
+      continue
+    }
+    let num = tryMatch(rest, NUM)
+    if (num) {
+      out = out + span("hl-number", num[0])
+      i = i + num[0].length
+      continue
+    }
+    let ident = tryMatch(rest, RegExp("^[a-zA-Z_][a-zA-Z0-9_-]*", ""))
+    if (ident) {
+      out = out + span("hl-ident", ident[0])
+      i = i + ident[0].length
+      continue
+    }
+    let punct = tryMatch(rest, RegExp("^[{}:;,()\\[\\]\\/*.@]", ""))
+    if (punct) {
+      out = out + span("hl-punctuation", punct[0])
+      i = i + punct[0].length
+      continue
+    }
+    out = out + escapeHtml(rest.charAt(0))
+    i = i + 1
+  }
+  return out
+}
+
+export fn highlightToHtml(source, filePath) {
+  let isCss = filePath !== undefined && filePath !== null && (filePath.endsWith(".css") || filePath.endsWith(".scss"))
+  let lines = source.split("\n")
+  let out = []
+  let i = 0
+  while (i < lines.length) {
+    if (isCss) {
+      out.push(tokenizeCssLine(lines[i]))
+    } else {
+      out.push(tokenizeTishLine(lines[i]))
+    }
+    i = i + 1
+  }
+  return out.join("\n")
+}

@@ -1,0 +1,197 @@
+// Browser-side compile + run helpers for Tish source.
+//
+// Two backends:
+//   - runVm(src, path, files?)  -> bytecode VM, returns captured stdout lines
+//   - runJsInIframe(...)        -> tish build --target js + Lattish runtime in iframe
+//
+// Depends on globals exposed by the host page (see public/index.html):
+//   window.__tishCompileToBytecodeWithImports(path, filesJson) -> base64
+//   window.__tishCompileToJsWithImports(path, filesJson)        -> JS source
+//   window.__tishVmRunCaptured(bytes)                           -> string[]
+//   window.__tishDecodeB64(b64)                                 -> Uint8Array
+
+let lattishRuntimeCache = null
+
+async fn getLattishRuntime() {
+  if (lattishRuntimeCache !== null) { return lattishRuntimeCache }
+  const res = await fetch("/dist/lattish-runtime.js")
+  lattishRuntimeCache = await res.text()
+  return lattishRuntimeCache
+}
+
+// In-browser runs prepend `lattish-runtime.js` (the bundle built from
+// `iframe-runtime.tish`) to the compiled user JS so that
+// createRoot / useState / useEffect / useRef / useLayoutEffect / Fragment
+// (from Lattish) and serve / dispatch / readFile / writeFile / readDir /
+// fileExists / mkdir / unlink / clearAll / createBcWebSocket / process
+// (from the iframe shims) are already in scope.
+//
+// The wasm compiler doesn't resolve bare specifiers like "lattish" or
+// "tish-browser-server" (no node_modules in the browser), so any user
+// import of a runtime package would error. Strip those lines before
+// compilation; the symbols are still in scope from the prepended runtime.
+//
+// Anything else (relative paths, `tish:*` natives, `@scope/pkg`) reaches
+// the compiler untouched and surfaces real errors as before.
+const RUNTIME_BARE_SPECIFIERS = ["lattish", "tish-browser-server"]
+
+fn stripRuntimeImports(src) {
+  if (src === null || src === undefined) { return "" }
+  let lines = String(src).split("\n")
+  let out = []
+  let i = 0
+  while (i < lines.length) {
+    let line = lines[i]
+    let drop = false
+    let j = 0
+    while (j < RUNTIME_BARE_SPECIFIERS.length) {
+      let spec = RUNTIME_BARE_SPECIFIERS[j]
+      if (line.indexOf("from \"" + spec + "\"") >= 0 || line.indexOf("from '" + spec + "'") >= 0) {
+        let trimmed = line
+        while (trimmed.length > 0 && (trimmed.charAt(0) === " " || trimmed.charAt(0) === "\t")) {
+          trimmed = trimmed.substring(1)
+        }
+        if (trimmed.length >= 6 && trimmed.substring(0, 6) === "import") { drop = true }
+      }
+      j = j + 1
+    }
+    if (!drop) { out.push(line) }
+    i = i + 1
+  }
+  return out.join("\n")
+}
+
+export fn buildFilesJson(entries) {
+  let map = {}
+  let i = 0
+  while (i < entries.length) {
+    let e = entries[i]
+    if (e.path.endsWith(".tish")) {
+      map[e.path] = stripRuntimeImports(e.text)
+    }
+    i = i + 1
+  }
+  return JSON.stringify(map)
+}
+
+export fn runVm(src, path, files) {
+  let entries = files !== undefined && files !== null ? files : [{ path: path, text: src }]
+  let filesJson = buildFilesJson(entries)
+  let b64 = window.__tishCompileToBytecodeWithImports(path, filesJson)
+  let bytes = window.__tishDecodeB64(b64)
+  return window.__tishVmRunCaptured(bytes)
+}
+
+export async fn compileToJsWithRuntime(src, path, files) {
+  let entries = files !== undefined && files !== null ? files : [{ path: path, text: src }]
+  let filesJson = buildFilesJson(entries)
+  let userJs = window.__tishCompileToJsWithImports(path, filesJson)
+  let runtime = await getLattishRuntime()
+  return runtime + "\n" + userJs
+}
+
+export async fn runJsInIframe(src, path, files, cssContent, previewApi, runId) {
+  try {
+    let js = await compileToJsWithRuntime(src, path, files)
+    previewApi.runJs(js, cssContent !== undefined && cssContent !== null ? cssContent : "", runId)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
+// Run-everything helper for FullIDE / Sandbox patterns.
+//   files       : array of { path, text }
+//   entryPath   : the .tish file to compile/run as the entry
+//   webPreview  : true -> compile to JS + run in iframe; false -> bytecode VM, console only
+//   terminal    : { appendLine, clear }
+//   preview     : { setText, runJs, setVmModeNotice } (optional when webPreview=false)
+//   runIdRef    : { current: number } incremented before each run
+//   onDoneBtnRef: optional ref to a "Run" button to re-enable when complete
+//   cssEntryPath: optional path of a .css file in `files` whose text becomes the iframe head <style>
+export async fn runCompileAndExec(opts) {
+  let files = opts.files
+  let entryPath = opts.entryPath
+  let webPreview = opts.webPreview
+  let terminal = opts.terminal
+  let preview = opts.preview
+  let runIdRef = opts.runIdRef
+  let onDoneBtnRef = opts.onDoneBtnRef !== undefined ? opts.onDoneBtnRef : null
+  let cssEntryPath = opts.cssEntryPath !== undefined ? opts.cssEntryPath : null
+
+  fn findEntry(entries, path) {
+    let i = 0
+    while (i < entries.length) {
+      if (entries[i].path === path) { return entries[i] }
+      i = i + 1
+    }
+    return null
+  }
+
+  try {
+    if (terminal !== null && terminal !== undefined) { terminal.clear() }
+    if (preview !== null && preview !== undefined) { preview.setText("") }
+    runIdRef.current = runIdRef.current + 1
+
+    let cssContent = ""
+    if (cssEntryPath !== null) {
+      let cssEntry = findEntry(files, cssEntryPath)
+      cssContent = cssEntry !== null ? cssEntry.text : ""
+    }
+
+    let entry = findEntry(files, entryPath)
+    let runSrc = entry !== null ? entry.text : ""
+
+    if (webPreview) {
+      let r = await runJsInIframe(runSrc, entryPath, files, cssContent, preview, runIdRef.current)
+      if (!r.ok) {
+        if (terminal !== null && terminal !== undefined) {
+          if ("appendError" in terminal) { terminal.appendError("Compile error", r.error) }
+          else { terminal.appendLine("JS compile error: " + r.error) }
+        }
+        if (preview !== null && preview !== undefined) { preview.setText(r.error) }
+      }
+    } else {
+      try {
+        let lines = runVm(runSrc, entryPath, files)
+        let i = 0
+        while (i < lines.length) {
+          let line = lines[i]
+          let isRuntimeErr = typeof line === "string" && line.length >= 9 && line.substring(0, 9) === "Runtime: "
+          if (terminal !== null && terminal !== undefined) {
+            if (isRuntimeErr && "appendError" in terminal) {
+              terminal.appendError("Runtime error", line.substring(9))
+            } else if (isRuntimeErr && "appendKind" in terminal) {
+              terminal.appendKind("runtime-error", line.substring(9))
+            } else {
+              terminal.appendLine(line)
+            }
+          }
+          i = i + 1
+        }
+        if (preview !== null && preview !== undefined) { preview.setVmModeNotice() }
+      } catch (e) {
+        if (terminal !== null && terminal !== undefined) {
+          if ("appendError" in terminal) { terminal.appendError("Compile error", String(e)) }
+          else {
+            terminal.appendLine("Bytecode compile error:")
+            terminal.appendLine(String(e))
+          }
+        }
+        if (preview !== null && preview !== undefined) { preview.setText(String(e)) }
+      }
+    }
+  } catch (e) {
+    if (terminal !== null && terminal !== undefined) {
+      if ("appendError" in terminal) { terminal.appendError("Error", String(e)) }
+      else { terminal.appendLine("Error: " + e) }
+    }
+    if (preview !== null && preview !== undefined) { preview.setText("Error: " + e) }
+  } finally {
+    let btn = onDoneBtnRef !== null && onDoneBtnRef !== undefined ? onDoneBtnRef.current : null
+    if (btn !== null && btn !== undefined) {
+      btn.disabled = false
+      btn.textContent = "Run"
+    }
+  }
+}

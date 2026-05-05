@@ -1,0 +1,38 @@
+{
+  "name": "tish-ide-panels",
+  "version": "0.2.0",
+  "description": "Reusable Lattish IDE panels + full SandboxIde shell for Tish: editor, terminal, web preview, file browser, mini-runner, embeddable sandbox-IDE with open-in-new-window. Pure Tish, zero JS deps.",
+  "license": "PIF",
+  "private": false,
+  "tish": {
+    "module": "./src/index.tish"
+  },
+  "main": "./src/index.tish",
+  "exports": {
+    ".": {
+      "tish": "./src/index.tish",
+      "default": "./src/index.tish"
+    },
+    "./standalone-entry": {
+      "tish": "./src/standalone-entry.tish",
+      "default": "./src/standalone-entry.tish"
+    },
+    "./panels.css": "./src/panels.css"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "example/"
+  ],
+  "peerDependencies": {
+    "lattish": "*"
+  },
+  "peerDependenciesMeta": {
+    "tish-tailwind": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "lattish": "../lattish"
+  }
+}

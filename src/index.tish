@@ -1,0 +1,49 @@
+// tish-ide-panels — public API.
+//
+// Reusable Lattish components for in-browser Tish IDE-like surfaces. Pure Tish, zero JS deps.
+//
+// Tish's bundler flattens transitive imports into one scope. We just import
+// each public symbol here so it's reachable from the package entry; consumers
+// then `import { Foo } from "tish-ide-panels"` and the bundler walks the graph.
+
+import { EditorPanel } from "./EditorPanel.tish"
+import { TerminalPanel } from "./TerminalPanel.tish"
+import { WebPreviewPanel } from "./WebPreviewPanel.tish"
+import { FileBrowserPanel } from "./FileBrowserPanel.tish"
+import { MiniRunner } from "./MiniRunner.tish"
+
+import { highlightToHtml } from "./highlight/TishHighlight.tish"
+import { useGlobalKeydown } from "./hooks/useGlobalKeydown.tish"
+import { useResize } from "./hooks/useResize.tish"
+
+import {
+  buildFilesJson,
+  runVm,
+  compileToJsWithRuntime,
+  runJsInIframe,
+  runCompileAndExec
+} from "./runtime/compileAndRun.tish"
+
+// Higher-level shell: full sandbox-IDE composed of the panels above, with
+// header + layout splits + persistence + hotkeys + open-in-new-window +
+// codepen-style share / embed / fork. Used by tish-playground, tish-learn,
+// and tish-ide via this single import.
+import {
+  SandboxIde,
+  mountSandboxIde,
+  readSandboxSession,
+  writeSandboxSession,
+  parseSandboxSid,
+  openSandboxBroadcast,
+  encodeSharePayload,
+  decodeSharePayload,
+  parseShareFromUrl,
+  readShareFromLocation,
+  isEmbedRequested,
+  buildShareUrl
+} from "./SandboxIde.tish"
+
+import {
+  StandalonePage,
+  mountStandalonePage
+} from "./StandalonePage.tish"

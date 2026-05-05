@@ -1,0 +1,74 @@
+// Web preview panel (JSX); iframe runs compiled JS.
+
+import { useRef, useLayoutEffect } from "lattish"
+
+export fn WebPreviewPanel(apiRef, stateRef) {
+  let preRef = useRef(null)
+  let iframeRef = useRef(null)
+  let mountKeyRef = useRef(0)
+  mountKeyRef.current = mountKeyRef.current + 1
+  useLayoutEffect(() => {
+    if (apiRef === null || apiRef === undefined) { return }
+    if (preRef.current === null || iframeRef.current === null) { return }
+    fn apply(st) {
+      if (st === null || st === undefined) { return }
+      if (st.err) {
+        iframeRef.current.style.display = "none"
+        preRef.current.style.display = "block"
+        preRef.current.textContent = st.txt !== undefined ? st.txt : ""
+      } else {
+        preRef.current.style.display = "none"
+        preRef.current.textContent = ""
+        let runId = st.runId !== undefined && st.runId !== null ? st.runId : 0
+        let bridge = "(function(){var id=" + String(runId) + ";['log','warn','error'].forEach(function(l){var o=console[l];console[l]=function(){var s=Array.prototype.map.call(arguments,function(x){return String(x)}).join(' ');try{parent.postMessage({type:'tish-console',id:id,level:l,line:s},'*')}catch(e){}o.apply(console,arguments)}})}());"
+        let userJs = st.js !== undefined ? st.js : ""
+        let safe = (bridge + "\n" + userJs).split("</script>").join("<\\/script>")
+        // Baseline so the user's app renders against a readable, neutral
+        // web-app surface regardless of the host page's theme. The iframe
+        // element itself inherits the host's dark/light background; with a
+        // transparent body that bleeds through and makes the default black
+        // text unreadable. Baking these defaults in fixes that, and the
+        // user's own CSS (or the cssEsc below) still overrides them since
+        // it loads after.
+        let baseline = "html,body{background:#ffffff;color:#111111;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5;margin:0;color-scheme:light dark}body{padding:1rem}a{color:#7c3aed}h1,h2,h3{margin:0.5rem 0}input,textarea,select{font:inherit;color:#111111;background:#ffffff;border:1px solid #d4d4d8;border-radius:6px;padding:0.4rem 0.6rem}input::placeholder,textarea::placeholder{color:#9ca3af}button{font:inherit;color:#111111;background:#f4f4f5;border:1px solid #d4d4d8;border-radius:6px;padding:0.4rem 0.85rem;cursor:pointer}button:hover{background:#e4e4e7}button:disabled{opacity:0.55;cursor:not-allowed}@media (prefers-color-scheme: dark){html,body{background:#0f1114;color:#e6e9ed}a{color:#a78bfa}input,textarea,select{color:#e6e9ed;background:#1a1d22;border-color:#2a2e36}input::placeholder,textarea::placeholder{color:#6b7280}button{color:#e6e9ed;background:#1a1d22;border-color:#2a2e36}button:hover{background:#23272e}}"
+        let baselineTag = "<style>" + baseline + "</style>"
+        let html = ""
+        if (st.css !== undefined && st.css !== null && st.css !== "") {
+          let cssEsc = st.css.split("</style>").join("<\\/style>")
+          html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" + baselineTag + "<style>" + cssEsc + "</style></head><body><script>" + safe + "</script></body></html>"
+        } else {
+          let base = typeof location !== "undefined" && location.origin ? location.origin : ""
+          let cssHref = base + "/web-preview.css"
+          html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" + baselineTag + "<link rel=\"stylesheet\" href=\"" + cssHref + "\"></head><body><script>" + safe + "</script></body></html>"
+        }
+        iframeRef.current.srcdoc = html
+        iframeRef.current.style.display = "block"
+        preRef.current.style.display = "none"
+      }
+    }
+    apiRef.current = {
+      setText: (text) => {
+        let st = { err: true, txt: text !== undefined ? text : "" }
+        if (stateRef) { stateRef.current = st }
+        apply(st)
+      },
+      runJs: (js, cssContent, runId) => {
+        let st = { err: false, js: js !== undefined ? js : "", css: cssContent !== undefined && cssContent !== null ? cssContent : "", runId: runId !== undefined && runId !== null ? runId : 0 }
+        if (stateRef) { stateRef.current = st }
+        apply(st)
+      },
+      setVmModeNotice: () => {
+        let st = { err: true, txt: "Console only (VM mode)" }
+        if (stateRef) { stateRef.current = st }
+        apply(st)
+      }
+    }
+    let st = stateRef && stateRef.current ? stateRef.current : null
+    if (st) { apply(st) }
+  }, [mountKeyRef.current])
+  return <div class="pg-preview">
+    <div class="pg-preview__label">{"Web preview"}</div>
+    <pre ref={preRef} class="pg-preview__body pg-preview__fallback scrollbar-thin" />
+    <iframe ref={iframeRef} class="pg-preview__iframe" sandbox="allow-scripts allow-same-origin" />
+  </div>
+}
