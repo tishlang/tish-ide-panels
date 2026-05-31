@@ -17,7 +17,11 @@
       "tish": "./src/standalone-entry.tish",
       "default": "./src/standalone-entry.tish"
     },
-    "./panels.css": "./src/panels.css"
+    "./panels.css": "./src/panels.css",
+    "./highlight": {
+      "tish": "./src/highlight/TishHighlight.tish",
+      "default": "./src/highlight/TishHighlight.tish"
+    }
   },
   "files": [
     "src/",
