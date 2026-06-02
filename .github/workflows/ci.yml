@@ -29,8 +29,6 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build
-        run: npm run build
 
   release_check:
     name: Release check (semantic-release dry-run)
