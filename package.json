@@ -15,29 +15,39 @@
   "exports": {
     ".": {
       "tish": "./src/index.tish",
-      "default": "./src/index.tish"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./standalone-entry": {
       "tish": "./src/standalone-entry.tish",
-      "default": "./src/standalone-entry.tish"
+      "import": "./dist/standalone-entry.js",
+      "require": "./dist/standalone-entry.js",
+      "default": "./dist/standalone-entry.js"
     },
     "./panels.css": "./src/panels.css",
     "./highlight": {
       "tish": "./src/highlight/TishHighlight.tish",
-      "default": "./src/highlight/TishHighlight.tish"
+      "import": "./dist/highlight/TishHighlight.js",
+      "require": "./dist/highlight/TishHighlight.js",
+      "default": "./dist/highlight/TishHighlight.js"
     }
   },
-  "main": "./src/index.tish",
+  "main": "./dist/index.js",
   "directories": {
     "example": "example"
   },
   "files": [
     "src/",
+    "dist/",
     "README.md",
     "example/"
   ],
   "scripts": {
-    "test": "node test/run-tests.mjs"
+    "test": "node test/run-tests.mjs",
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@semantic-release/commit-analyzer": "^13.0.1",
@@ -62,5 +72,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "module": "./dist/index.js"
 }

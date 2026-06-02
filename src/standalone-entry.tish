@@ -1,13 +1,7 @@
-// Bundle entry that hosts (e.g. tish-ide / Tauri) compile to JS and import
-// directly. Re-exports the two top-level mounters so the host TS code can do:
-//
-//   import { mountSandboxIde, mountStandalonePage } from "./generated/sandbox.js"
-//
-// and have a complete view of the package without walking individual file paths.
-
 import { mountSandboxIde, SandboxIde } from "./SandboxIde.tish"
 import { mountStandalonePage, StandalonePage } from "./StandalonePage.tish"
 
-// Browser-side `tish build` flattens transitive imports; bringing each name
-// into this scope keeps the bundler emitting them as exports of this module.
-export { mountSandboxIde, SandboxIde, mountStandalonePage, StandalonePage }
+export const _mountSandboxIde = mountSandboxIde
+export const _SandboxIde = SandboxIde
+export const _mountStandalonePage = mountStandalonePage
+export const _StandalonePage = StandalonePage
