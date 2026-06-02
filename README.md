@@ -2,8 +2,6 @@
 
 Reusable [Lattish](https://github.com/tishlang/lattish) IDE panels **and** a full embeddable sandbox-IDE shell for in-browser Tish tooling. Shared as the single source of truth across [`tish-playground`](https://github.com/tishlang/tish), [`tish-learn`](https://github.com/tishlang/tish-learn), and the Tauri-based [`tish-ide`](https://github.com/tishlang/tish-ide). **Pure Tish, zero JS dependencies.**
 
-> Package name is intentionally unscoped (`tish-ide-panels`, not `@tishlang/...`) because the Tish compiler reserves `@tishlang/*` for native Rust modules. Same pattern as the [`lattish`](https://www.npmjs.com/package/lattish) package.
-
 ## What's in here
 
 | Export | Purpose |
