@@ -1,6 +1,6 @@
 // Hook for global keyboard shortcuts.
 
-import { useLayoutEffect } from "lattish"
+import { useLayoutEffect } from "@tishlang/lattish"
 
 export fn useGlobalKeydown(handlers) {
   useLayoutEffect(() => {

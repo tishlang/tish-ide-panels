@@ -4,7 +4,7 @@
 //
 // Tish's bundler flattens transitive imports into one scope. We just import
 // each public symbol here so it's reachable from the package entry; consumers
-// then `import { Foo } from "tish-ide-panels"` and the bundler walks the graph.
+// then `import { Foo } from "@tishlang/tish-ide-panels"` and the bundler walks the graph.
 
 import { EditorPanel } from "./EditorPanel.tish"
 import { TerminalPanel } from "./TerminalPanel.tish"

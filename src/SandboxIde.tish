@@ -44,7 +44,7 @@
 //   mountSandboxIde(rootEl, props)  — the same shape mountShell() had in
 //   tish-playground; sets `pg-root` className and hands off to createRoot.
 
-import { createRoot, useState, useRef, useLayoutEffect } from "lattish"
+import { createRoot, useState, useRef, useLayoutEffect } from "@tishlang/lattish"
 
 import { EditorPanel } from "./EditorPanel.tish"
 import { TerminalPanel } from "./TerminalPanel.tish"

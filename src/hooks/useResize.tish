@@ -1,6 +1,6 @@
 // Hook for resizable split layout. Returns handlers and resize state for CSS.
 
-import { useState, useRef, useLayoutEffect } from "lattish"
+import { useState, useRef, useLayoutEffect } from "@tishlang/lattish"
 
 export fn useResize(bodyRef, layout, setLayout, saveLayout) {
   let layoutRef = useRef(layout)

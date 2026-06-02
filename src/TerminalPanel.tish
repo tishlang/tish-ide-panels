@@ -7,7 +7,7 @@
 //   appendError(title, body)      -> two-part error block (title + body)
 //   clear()
 
-import { useRef, useLayoutEffect } from "lattish"
+import { useRef, useLayoutEffect } from "@tishlang/lattish"
 
 fn makeLine(text, cls) {
   let row = document.createElement("div")

@@ -1,8 +1,8 @@
 // Minimal example: editor + terminal + Run button.
 // Mount with createRoot(document.body).render(App).
 
-import { createRoot, useRef, useState } from "lattish"
-import { EditorPanel, TerminalPanel, runCompileAndExec } from "tish-ide-panels"
+import { createRoot, useRef, useState } from "@tishlang/lattish"
+import { EditorPanel, TerminalPanel, runCompileAndExec } from "@tishlang/tish-ide-panels"
 
 fn App() {
   let editorApi = useRef(null)

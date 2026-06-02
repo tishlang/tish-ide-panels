@@ -3,7 +3,7 @@
 // Undo/redo: ⌘/Ctrl+Z, ⌘/Ctrl+Shift+Z or ⌘/Ctrl+Y (beforeinput batches typing ~350ms).
 // Passes onKeydown for shell hotkeys when editor shortcuts don't apply.
 
-import { useRef, useLayoutEffect } from "lattish"
+import { useRef, useLayoutEffect } from "@tishlang/lattish"
 
 const MAX_UNDO = 200
 const TX_GAP_MS = 350

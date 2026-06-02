@@ -17,7 +17,7 @@
 //                    can override the popup behavior even from the standalone
 //                    page (e.g. spawn another WebviewWindow).
 
-import { createRoot, useRef, useLayoutEffect } from "lattish"
+import { createRoot, useRef, useLayoutEffect } from "@tishlang/lattish"
 import {
   SandboxIde,
   readSandboxSession,

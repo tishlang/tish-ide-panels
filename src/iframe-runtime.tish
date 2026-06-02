@@ -9,7 +9,7 @@
 // source like `serve(port, handler)` and `<App />` work after the
 // runtime stripper drops bare-specifier imports.
 
-import { createRoot, useState, useRef, useLayoutEffect, useEffect, useMemo, Fragment } from "lattish"
+import { createRoot, useState, useRef, useLayoutEffect, useEffect, useMemo, Fragment } from "@tishlang/lattish"
 
 import {
   serve,

@@ -1,13 +1,17 @@
 {
-  "name": "tish-ide-panels",
+  "name": "@tishlang/tish-ide-panels",
   "version": "0.2.0",
   "description": "Reusable Lattish IDE panels + full SandboxIde shell for Tish: editor, terminal, web preview, file browser, mini-runner, embeddable sandbox-IDE with open-in-new-window. Pure Tish, zero JS deps.",
   "license": "PIF",
   "private": false,
-  "tish": {
-    "module": "./src/index.tish"
+  "homepage": "https://github.com/tishlang/tish-ide-panels#readme",
+  "bugs": {
+    "url": "https://github.com/tishlang/tish-ide-panels/issues"
   },
-  "main": "./src/index.tish",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tishlang/tish-ide-panels.git"
+  },
   "exports": {
     ".": {
       "tish": "./src/index.tish",
@@ -23,20 +27,38 @@
       "default": "./src/highlight/TishHighlight.tish"
     }
   },
+  "main": "./src/index.tish",
+  "directories": {
+    "example": "example"
+  },
   "files": [
     "src/",
     "README.md",
     "example/"
   ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@tishlang/lattish": "../lattish",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/github": "^12.0.6",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.0",
+    "semantic-release": "^25.0.3"
+  },
   "peerDependencies": {
-    "lattish": "*"
+    "@tishlang/lattish": "*"
   },
   "peerDependenciesMeta": {
-    "tish-tailwind": {
+    "@tishlang/tish-tailwind": {
       "optional": true
     }
   },
-  "devDependencies": {
-    "lattish": "../lattish"
+  "tish": {
+    "module": "./src/index.tish"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

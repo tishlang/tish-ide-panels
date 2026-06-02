@@ -18,7 +18,7 @@
 //   readonly      : if true, the editor is read-only.
 //   onPass        : optional fn() invoked when the code passes the expected check.
 
-import { useRef, useState, useLayoutEffect } from "lattish"
+import { useRef, useState, useLayoutEffect } from "@tishlang/lattish"
 import { EditorPanel } from "./EditorPanel.tish"
 import { runVm } from "./runtime/compileAndRun.tish"
 

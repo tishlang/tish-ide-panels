@@ -1,6 +1,6 @@
 // File list panel (JSX).
 
-import {} from "lattish"
+import {} from "@tishlang/lattish"
 
 export fn FileBrowserPanel(paths, currentPath, onSelect) {
   let items = []
