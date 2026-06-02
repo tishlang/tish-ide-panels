@@ -1,0 +1,36 @@
+import { Fragment, h, createRoot } from "@tishlang/lattish"
+import { EditorPanel } from "../src/EditorPanel.tish"
+import { SandboxIde } from "../src/SandboxIde.tish"
+
+fn assert(cond, msg) {
+  if (!cond) {
+    throw "Assertion failed: " + msg
+  }
+}
+
+fn mountInDiv(vnodeFn) {
+  let c = document.createElement("div")
+  createRoot(c).render(vnodeFn)
+  return c
+}
+
+fn testExports() {
+  assert(typeof EditorPanel === "function", "EditorPanel is exported")
+  assert(typeof SandboxIde === "function", "SandboxIde is exported")
+}
+
+fn testEditorPanel() {
+  let c = mountInDiv(() => EditorPanel(null, "hello", null, null, null))
+  assert(c.firstChild !== null, "EditorPanel mounted")
+  let textarea = c.querySelector("textarea")
+  assert(textarea !== null, "Editor textarea found")
+  assert(textarea.value === "hello", "Editor initial content populated")
+}
+
+fn main() {
+  testExports()
+  testEditorPanel()
+  console.log("tish-ide-panels tests passed")
+}
+
+main()
