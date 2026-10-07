@@ -2,7 +2,7 @@
   "name": "@tishlang/tish-ide-panels",
   "version": "0.2.0",
   "description": "Reusable Lattish IDE panels + full SandboxIde shell for Tish: editor, terminal, web preview, file browser, mini-runner, embeddable sandbox-IDE with open-in-new-window. Pure Tish, zero JS deps.",
-  "license": "PIF",
+  "license": "MIT",
   "private": false,
   "homepage": "https://github.com/tishlang/tish-ide-panels#readme",
   "bugs": {
