@@ -263,7 +263,8 @@ fn tokenizeCssLine(line) {
 }
 
 export fn highlightToHtml(source, filePath) {
-  let isCss = filePath !== undefined && filePath !== null && (filePath.endsWith(".css") || filePath.endsWith(".scss"))
+  // Compare against null only: the Tish VM (tish run) has no `undefined`, and a missing arg is null.
+  let isCss = filePath !== null && (filePath.endsWith(".css") || filePath.endsWith(".scss"))
   let lines = source.split("\n")
   let out = []
   let i = 0
